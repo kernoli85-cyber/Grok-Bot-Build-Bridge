@@ -455,7 +455,6 @@ function Invoke-HostPrereqSelfTest {
     }
 
     # WSL UTF-16 NULs + English row
-    )
     # Simulate NUL-heavy decode path via ConvertFrom-CliBytes
     $bytes = [System.Text.Encoding]::Unicode.GetBytes("  NAME      STATE           VERSION`r`n* Ubuntu    Running         2`r`n")
     $decoded = ConvertFrom-CliBytes -Bytes $bytes
