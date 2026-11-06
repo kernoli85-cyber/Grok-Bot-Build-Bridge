@@ -13,7 +13,8 @@ class JobStatus(str, Enum):
     CLAIMED = "claimed"
     RUNNING = "running"
     SUCCEEDED = "succeeded"
-    FAILED = "failed"
+    FAILED = "failed"  # definitive failure before/without uncertain execution
+    NEEDS_REVIEW = "needs_review"  # started/uncertain — NO auto-requeue
     CANCELLED = "cancelled"
     DEAD_LETTERED = "dead_lettered"
 
@@ -26,11 +27,14 @@ TERMINAL_JOB = frozenset(
     }
 )
 
+# Not terminal, but must not be auto-reclaimed into QUEUED after side effects may exist
+UNCERTAIN_JOB = frozenset({JobStatus.NEEDS_REVIEW})
+
 
 class DeliveryState(str, Enum):
     PENDING = "pending"
     HTTP_ACCEPTED = "http_accepted"  # transport ack only — NOT bot-processed
-    BOT_PROCESSED = "bot_processed"  # consumer ack — still not global exactly-once
+    BOT_PROCESSED = "bot_processed"
     FAILED = "failed"
     DEAD_LETTERED = "dead_lettered"
 
@@ -42,7 +46,7 @@ ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.CLAIMED: frozenset(
         {
             JobStatus.RUNNING,
-            JobStatus.QUEUED,  # lease expired / release
+            JobStatus.QUEUED,  # lease expired BEFORE execution started — safe
             JobStatus.CANCELLED,
             JobStatus.FAILED,
             JobStatus.DEAD_LETTERED,
@@ -51,14 +55,22 @@ ALLOWED_TRANSITIONS: dict[JobStatus, frozenset[JobStatus]] = {
     JobStatus.RUNNING: frozenset(
         {
             JobStatus.SUCCEEDED,
-            JobStatus.FAILED,
-            JobStatus.CANCELLED,
+            JobStatus.FAILED,  # definitive known failure (e.g. exit nonzero before timeout)
+            JobStatus.NEEDS_REVIEW,  # timeout / lease while running / uncertain
+            JobStatus.CANCELLED,  # state-only cancel request
             JobStatus.DEAD_LETTERED,
         }
     ),
     JobStatus.FAILED: frozenset(
         {
-            JobStatus.QUEUED,  # retry
+            JobStatus.QUEUED,  # explicit retry only
+            JobStatus.DEAD_LETTERED,
+            JobStatus.CANCELLED,
+        }
+    ),
+    JobStatus.NEEDS_REVIEW: frozenset(
+        {
+            JobStatus.QUEUED,  # explicit retry only — never automatic
             JobStatus.DEAD_LETTERED,
             JobStatus.CANCELLED,
         }
@@ -83,7 +95,6 @@ class JobRecord:
     lease_owner: str | None = None
     lease_until: float | None = None
     last_error_code: str | None = None
-    # Intentionally NO prompt/transcript fields in persisted default record
 
 
 @dataclass(frozen=True)
@@ -98,6 +109,6 @@ class OutboxEvent:
     max_attempts: int
     created_at: float
     next_attempt_at: float
-    payload: dict[str, Any]  # small status metadata only
+    payload: dict[str, Any]
     last_error: str | None = None
     dedupe_key: str | None = None

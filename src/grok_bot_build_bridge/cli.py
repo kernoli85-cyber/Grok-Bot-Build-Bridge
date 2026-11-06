@@ -15,6 +15,8 @@ from .state import DeliveryState, JobStatus, JobStore
 from .state.store import StoreError
 from .transport.pump import pump_outbox
 from .transport.webhook import WebhookConfig, WebhookTransport, load_webhook_config
+from .runner import build_approved_plan, execute_one_shot
+from .runner.plan import PlanError
 
 
 def _report_to_dict(report: DiscoveryReport) -> dict:
@@ -298,6 +300,85 @@ def cmd_outbox_pump(args: argparse.Namespace) -> int:
 
 
 
+def cmd_runner_run(args: argparse.Namespace) -> int:
+    """One-shot runner. Dry-run by default; --execute required to spawn a process."""
+    store = _store_from_args(args)
+    try:
+        plan = build_approved_plan(
+            task_id=args.task_id,
+            backend=args.backend,
+            cwd=args.cwd,
+            executable=args.executable,
+            max_turns=args.max_turns,
+            permission_mode=args.permission_mode,
+            timeout_sec=args.timeout,
+            prompt=args.prompt,
+            prompt_via_stdin=not args.force_prompt_argv,
+            force_prompt_argv=args.force_prompt_argv,
+            extra_args=tuple(args.extra or ()),
+            deny_rules=tuple(args.deny or ()),
+        )
+    except PlanError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    try:
+        outcome = execute_one_shot(
+            store,
+            plan,
+            owner=args.owner,
+            dry_run=not args.execute,
+            lease_sec=args.lease_sec,
+        )
+    except StoreError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump(
+        {
+            "dry_run": outcome.dry_run,
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "returncode": outcome.returncode,
+            "timed_out": outcome.timed_out,
+            "error_code": outcome.error_code,
+            "stdout_truncated": outcome.stdout_truncated,
+            "stderr_truncated": outcome.stderr_truncated,
+            "note": outcome.note,
+            "argv_preview": list(outcome.argv_preview),
+            "state_db": str(store.db_path),
+            "cancel_note": "cancellation is state-only; process tree kill not claimed",
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_jobs_retry(args: argparse.Namespace) -> int:
+    store = _store_from_args(args)
+    try:
+        job = store.explicit_retry(args.task_id)
+    except StoreError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump(
+        {
+            "task_id": job.task_id,
+            "status": job.status.value,
+            "attempt": job.attempt,
+            "note": "explicit_retry_only; notification outbox separate",
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -359,6 +440,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_pump.add_argument("--send", action="store_true", help="Actually POST (default is dry-run)")
     p_pump.add_argument("--limit", type=int, default=20)
     p_pump.set_defaults(func=cmd_outbox_pump)
+
+    p_run = sub.add_parser(
+        "runner-run",
+        help="One-shot job runner (dry-run default; --execute to spawn)",
+    )
+    p_run.add_argument("--state-db", required=True)
+    p_run.add_argument("--task-id", required=True)
+    p_run.add_argument("--backend", choices=["native", "wsl"], default="wsl")
+    p_run.add_argument("--cwd", required=True)
+    p_run.add_argument("--executable", required=True, help="Resolved grok or bridge-dummy path")
+    p_run.add_argument("--owner", default="local-worker")
+    p_run.add_argument("--timeout", type=float, default=30.0)
+    p_run.add_argument("--lease-sec", type=float, default=300.0)
+    p_run.add_argument("--max-turns", type=int, default=None)
+    p_run.add_argument("--permission-mode", default=None)
+    p_run.add_argument("--prompt", default="")
+    p_run.add_argument("--force-prompt-argv", action="store_true")
+    p_run.add_argument("--deny", action="append", default=[])
+    p_run.add_argument("--extra", action="append", default=[])
+    p_run.add_argument("--execute", action="store_true", help="Actually spawn process")
+    p_run.set_defaults(func=cmd_runner_run)
+
+    p_retry = sub.add_parser("jobs-retry", help="Explicit retry from failed/needs_review")
+    p_retry.add_argument("--state-db", required=True)
+    p_retry.add_argument("--task-id", required=True)
+    p_retry.set_defaults(func=cmd_jobs_retry)
     return p
 
 

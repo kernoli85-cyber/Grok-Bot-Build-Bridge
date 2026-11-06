@@ -38,6 +38,16 @@ python -m grok_bot_build_bridge.cli plan-demo
 
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
+## One-shot runner (Slice 5)
+
+- `runner-run` dry-run by default; `--execute` required to spawn
+- Immutable `ApprovedExecutionPlan`; forbids `--always-approve` / bypass modes
+- Timeout / lease-while-running ⇒ `needs_review` (**no auto-requeue**)
+- Explicit `jobs-retry` only; outbox notification retries stay separate
+- Bounded stdout/stderr capture while reading; no transcript storage by default
+- Cancel remains **state-only** (no process-tree kill claim)
+- Tests use `bridge-dummy` (no paid grok calls)
+
 ## Webhook transport (Slice 4)
 
 - HTTPS-only outbox pump (`outbox-pump`); **dry-run by default**

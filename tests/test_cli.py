@@ -7,7 +7,7 @@ from grok_bot_build_bridge.cli import main
 
 def test_cli_version(capsys):
     assert main(["version"]) == 0
-    assert capsys.readouterr().out.strip() == "0.4.0"
+    assert capsys.readouterr().out.strip() == "0.5.0"
 
 
 def test_cli_discover_demo(capsys):
@@ -60,3 +60,20 @@ def test_cli_outbox_pump_dry_run(tmp_path, capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["dry_run"] is True
     assert data["results"]
+
+
+def test_cli_runner_dry_run(tmp_path, capsys):
+    from pathlib import Path as P
+    dummy = P(__file__).parent / "fixtures" / "bridge-dummy"
+    db = tmp_path / "s.sqlite"
+    assert main([
+        "runner-run",
+        "--state-db", str(db),
+        "--task-id", "r1",
+        "--cwd", str(tmp_path),
+        "--executable", str(dummy),
+        "--prompt", "x",
+    ]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["dry_run"] is True
+    assert data["status"] == "dry_run"
