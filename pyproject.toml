@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grok-bot-build-bridge"
-version = "0.14.0"
+version = "0.15.0"
 description = "Discovery, routing, and companion scaffolding for Grok Bot ↔ Grok Build"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -32,6 +32,7 @@ include = ["grok_bot_build_bridge*"]
 "grok_bot_build_bridge" = [
   "resources/fixtures/*",
   "resources/skill/**/*",
+  "resources/scripts/*",
 ]
 
 [tool.pytest.ini_options]

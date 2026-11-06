@@ -119,6 +119,40 @@ def cmd_discover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_host_prereq(args: argparse.Namespace) -> int:
+    """Read-only host prereq JSON. Never installs; never starts WSL; never asserts absent package version."""
+    from .host_prereq import collect_host_prereq, fixture_host_prereq_windows
+    from .resources import fixture_text
+
+    if getattr(args, "fixture", None) == "windows-running":
+        report = fixture_host_prereq_windows(
+            wsl_list_text=fixture_text("wsl_list_v_running.txt"),
+            companion_present=False,
+        )
+    elif getattr(args, "fixture", None) == "windows-stopped":
+        report = fixture_host_prereq_windows(
+            wsl_list_text=fixture_text("wsl_list_v_stopped.txt"),
+            companion_present=False,
+        )
+    else:
+        report = collect_host_prereq()
+    json.dump(report.to_dict(), sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_host_prereq_script(_args: argparse.Namespace) -> int:
+    """Print packaged Windows host-prereq-check.ps1 (no secrets)."""
+    from .host_prereq import packaged_host_prereq_script_text
+
+    text = packaged_host_prereq_script_text()
+    sys.stdout.write(text)
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
+    return 0
+
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     print(__version__)
     return 0
@@ -664,6 +698,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="Print package version").set_defaults(func=cmd_version)
+    p_hp = sub.add_parser(
+        "host-prereq",
+        help=(
+            "Read-only host prerequisite JSON (Python/venv/WSL list); "
+            "never installs; never starts stopped WSL; does not assert companion version"
+        ),
+    )
+    p_hp.add_argument(
+        "--fixture",
+        choices=["windows-running", "windows-stopped"],
+        default=None,
+        help="Deterministic Windows-shaped fixture (CI / demos); not live host evidence",
+    )
+    p_hp.set_defaults(func=cmd_host_prereq)
+    sub.add_parser(
+        "host-prereq-script",
+        help="Print packaged host-prereq-check.ps1 for approved copy to Windows desktop",
+    ).set_defaults(func=cmd_host_prereq_script)
+
     sub.add_parser(
         "skill-draft",
         help="Print packaged draft Einrichtung skill (not globally installed)",

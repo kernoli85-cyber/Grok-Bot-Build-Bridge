@@ -117,6 +117,10 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - `http_accepted` ≠ `bot_processed` (no false exactly-once)
 - CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
 
+## Local-exec host prereq (Slice 15 / v0.15.0)
+
+Portable draft skill + `scripts/host-prereq-check.ps1` (and packaged copy) for **approved** Grok Bot desktop local execution — no Tailscale, no extra accounts. First proof is read-only built-in checks **without** asserting companion version. See `docs/LOCAL_EXEC.md`. Wheel remains the distributable; repo stays on Bot BOX.
+
 ## Authenticated MCP streamable HTTP (Slice 14 / v0.14.0)
 
 ASGI app factory with static-bearer auth + Host/Origin allowlists (official MCP SDK Streamable HTTP). CLI `mcp-http-check` only — **no listener**. In-process ASGI tests; see `docs/DISTRIBUTION.md` for deployment choices (private network / tunnel / public HTTPS) that require the user.

@@ -77,6 +77,8 @@ def test_wheel_excludes_secrets_tests_and_local_paths(built_artifacts):
     # Must ship packaged resources
     assert any("resources/fixtures/wsl_list_v_running.txt" in n for n in names)
     assert any("SKILL.md" in n for n in names)
+    assert any("host-prereq-check.ps1" in n for n in names)
+    assert any("wsl_list_v_stopped.txt" in n for n in names)
     # No absolute workspace paths encoded as file names
     assert "/workspace/" not in joined
     assert "C:\\Users\\" not in joined

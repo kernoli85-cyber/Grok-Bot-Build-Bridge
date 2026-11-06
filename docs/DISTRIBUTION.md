@@ -120,3 +120,7 @@ Once this ASGI app is ready, **you** must choose how agents reach it:
 3. **Public hosting** — deploy behind a public HTTPS reverse proxy / private CA as appropriate; manage DNS, certs, and the static bearer as account secrets.
 
 This PR does **not** register AddMcpServer, open ports, buy hosting, or change Windows/WSL hosts.
+
+## Local desktop execution (no extra account)
+
+See `docs/LOCAL_EXEC.md`. Preferred operator path under the no-Tailscale constraint: registered Grok Bot desktop + approved companion wheel/script copy. Draft skill remains interim; Connect-app catalog listing is still a platform gap.
