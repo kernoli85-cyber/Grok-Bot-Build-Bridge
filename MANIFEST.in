@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include docs/DISTRIBUTION.md
+recursive-include src/grok_bot_build_bridge/resources *
+prune src/grok_bot_build_bridge/__pycache__
+global-exclude *.pyc *.pyo *.sqlite *.pem *.key

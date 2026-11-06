@@ -72,11 +72,10 @@ def _report_to_dict(report: DiscoveryReport) -> dict:
 
 
 def cmd_discover_demo(_args: argparse.Namespace) -> int:
-    """Deterministic demo using fixtures — no host probing."""
-    from pathlib import Path
+    """Deterministic demo using packaged fixtures — no host probing."""
+    from .resources import fixture_text
 
-    fix = Path(__file__).resolve().parents[2] / "tests" / "fixtures"
-    wsl_list = (fix / "wsl_list_v_running.txt").read_text(encoding="utf-8")
+    wsl_list = fixture_text("wsl_list_v_running.txt")
     # Simulate measured host: native absent, WSL okern ready
     cand = nonroot_ready(
         distro="Ubuntu",
@@ -465,12 +464,11 @@ def cmd_onboard(args: argparse.Namespace) -> int:
             elif d.error == "executable_not_found":
                 probe_notes.append(f"probe_absent_tool:{d.step}")
     else:
-        # Deterministic fixture path — same facts as discover-demo
-        from pathlib import Path as _P
+        # Deterministic packaged fixtures — same facts as discover-demo
         from .discovery import classify_discovery, nonroot_ready
+        from .resources import fixture_text
 
-        fix = _P(__file__).resolve().parents[2] / "tests" / "fixtures"
-        wsl_list = (fix / "wsl_list_v_running.txt").read_text(encoding="utf-8")
+        wsl_list = fixture_text("wsl_list_v_running.txt")
         cand = nonroot_ready(
             distro="Ubuntu",
             user="okern",
@@ -597,6 +595,21 @@ def cmd_prefs_save(args: argparse.Namespace) -> int:
 
 
 
+def cmd_skill_draft(_args: argparse.Namespace) -> int:
+    """Print packaged draft skill text (not globally installed)."""
+    from .resources import draft_skill_path_hint, draft_skill_text
+
+    payload = {
+        "note": "repo/package draft only — not marketplace-installed; parent owns UpdateSkill",
+        "repo_path_hint": draft_skill_path_hint(),
+        "text": draft_skill_text(),
+    }
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -607,6 +620,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="Print package version").set_defaults(func=cmd_version)
+    sub.add_parser(
+        "skill-draft",
+        help="Print packaged draft Einrichtung skill (not globally installed)",
+    ).set_defaults(func=cmd_skill_draft)
     sub.add_parser(
         "discover",
         help="Live read-only Windows/WSL discovery (no installs, no grok jobs)",

@@ -1,0 +1,11 @@
+{
+  "name": "grok-bot-build-bridge",
+  "version": "0.10.0",
+  "description": "Guided Einrichtung for Grok Bot-Build Bridge companion (skills only; local Python companion installs separately). Draft — not marketplace-submitted.",
+  "author": {
+    "name": "Grok Bot-Build Bridge contributors"
+  },
+  "keywords": ["grok-bot", "build-bridge", "onboarding", "wsl", "windows"],
+  "license": "MIT",
+  "skills": "./skills/"
+}

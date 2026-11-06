@@ -42,6 +42,15 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
 
 
+
+## Distribution (Slice 10)
+
+- Build **sdist + wheel** via `python -m build` (CI); **no PyPI publish** in this PR
+- Isolated venv install smoke on Ubuntu + Windows CI (entry point works outside checkout)
+- Packaged fixtures/skill text via `importlib.resources` (no `tests/` dependency after install)
+- Manual companion install vs Bot plugin documented in `docs/DISTRIBUTION.md`
+- Draft Cursor plugin layout: `drafts/plugin/` — **not** marketplace-submitted (gate: public repo + [marketplace publish](https://cursor.com/marketplace/publish) per [Cursor Plugins reference](https://cursor.com/docs/reference/plugins))
+
 ## Bot onboarding adapter + preferences (Slice 9)
 
 - Strict `schema_version=1` plan ingest (`onboard-view`): rejects unknown schema / malformed / oversized; redacts sensitive keys; checklist is **display data** (`treat_as_shell=false`)
