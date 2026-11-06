@@ -333,7 +333,7 @@ def test_wheel_mcp_stdio_integration(tmp_path: Path):
         cwd=str(tmp_path),
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
-    assert "0.15" in probe.stdout
+    assert probe.stdout.strip().startswith("0.15")
     assert "site-packages" in probe.stdout.replace("\\", "/")
 
     state_dir = tmp_path / "mcp-state"

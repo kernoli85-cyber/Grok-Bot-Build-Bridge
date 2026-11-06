@@ -22,6 +22,13 @@ Same Grok Bot account ≠ always‑allow. A denied approval means **stop** (no p
 
 **Evidence separation:** `host-prereq --fixture windows-*` is **CI/demo only**, not live host evidence. Installed‑wheel smoke tests prove packaging; they do **not** prove the operator's desktop.
 
+## Script guarantees (v0.15.1+)
+
+- Enforces Python **>= 3.11** (`meets_min`).
+- Retains launcher argv prefix / resolves `sys.executable` for venv (no bare `py.exe -c` without `-3`).
+- Skips WindowsApps store aliases; bounded timeouts on all probes.
+- WSL `-l -v` only; UTF-16/NUL decode; English states only; spaced/localized lines skipped (not ready).
+
 ## First host proof (read‑only, package may be absent)
 
 After the parent obtains normal local‑exec approval on the selected `machineId`:
@@ -31,7 +38,7 @@ After the parent obtains normal local‑exec approval on the selected `machineId
 powershell -NoProfile -NonInteractive -File .\host-prereq-check.ps1
 ```
 
-Expect JSON with `companion_cli.status = absent` if the wheel is not installed yet — that is success for first proof, **not** a version assertion failure.
+Expect JSON with `python.meets_min` for 3.11+, `companion_cli.status = absent` if the wheel is not installed yet — that is success for first proof, **not** a version assertion failure.
 
 Optional after wheel install (still approved commands only):
 

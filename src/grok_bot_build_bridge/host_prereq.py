@@ -1,7 +1,8 @@
 """Read-only host prerequisite check (Windows-oriented; honest on Linux BOX).
 
 Never installs, never starts stopped WSL distros, never asserts companion
-version when the CLI is absent, never reads secrets.
+version when the CLI is absent, never reads secrets. Probes are argv-only
+with timeouts via safe_exec.
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ Runner = Callable[..., RunResult]
 RuntimeKind = Literal["windows_host", "box_or_linux", "darwin", "other"]
 
 _PY_VER = re.compile(r"Python\s+(\d+\.\d+\.\d+)", re.IGNORECASE)
+_SYS_VER = re.compile(r"^(\d+\.\d+\.\d+)$")
+_MIN = (3, 11)
 
 
 @dataclass(frozen=True)
@@ -38,6 +41,84 @@ def runtime_kind() -> RuntimeKind:
     if plat == "darwin":
         return "darwin"
     return "other"
+
+
+def version_meets_min(version: str, *, minimum: tuple[int, int] = _MIN) -> bool:
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", version or "")
+    if not m:
+        return False
+    maj, minor = int(m.group(1)), int(m.group(2))
+    if maj != minimum[0]:
+        return maj > minimum[0]
+    return minor >= minimum[1]
+
+
+def is_windowsapps_alias_path(path: str | None) -> bool:
+    if not path:
+        return False
+    norm = path.replace("/", "\\").lower()
+    return "\\windowsapps\\" in norm
+
+
+def parse_wsl_list_with_skips(text: str) -> dict[str, Any]:
+    """Parse WSL list text; English states only. Unknown/localized lines → skipped."""
+    rows = parse_wsl_list_verbose(text)
+    # Re-scan for skipped (parity messaging for reports / tests)
+    cleaned = (text or "").replace("\x00", "").replace("\ufeff", "")
+    skipped: list[dict[str, str]] = []
+    parsed_names = {str(r.get("name")) for r in rows}
+    for raw in cleaned.splitlines():
+        line = re.sub(r"\s+", " ", raw.strip())
+        if not line:
+            continue
+        low = line.lower()
+        if low.startswith("name") and "state" in low:
+            continue
+        if low == "name":
+            continue
+        # If parse_wsl_list_verbose accepted it, skip
+        # Heuristic: line contains a safe name we already have
+        matched = False
+        for name in parsed_names:
+            if re.search(rf"(^|\*\s*){re.escape(name)}\s+", line):
+                matched = True
+                break
+        if matched:
+            continue
+        # Could be malformed / localized / unsafe name
+        skipped.append(
+            {
+                "line": line[:120],
+                "reason": "unparsed_localized_or_unsafe_or_malformed",
+            }
+        )
+    stopped = any(str(r.get("state", "")).lower() == "stopped" for r in rows)
+    distros = []
+    for r in rows:
+        state = str(r.get("state") or "")
+        distros.append(
+            {
+                "name": r.get("name"),
+                "state": state,
+                "version": r.get("version"),
+                "default": bool(r.get("default")),
+                "note": (
+                    "stopped_ask_operator_before_start"
+                    if state.lower() == "stopped"
+                    else None
+                ),
+                "readiness": (
+                    "listed_running_not_probed"
+                    if state.lower() == "running"
+                    else "not_ready_from_list_alone"
+                ),
+            }
+        )
+    return {
+        "distros": distros,
+        "skipped_lines": skipped,
+        "stopped_present": stopped,
+    }
 
 
 def _base_notes(kind: RuntimeKind) -> dict[str, str]:
@@ -72,57 +153,90 @@ def _base_notes(kind: RuntimeKind) -> dict[str, str]:
 
 
 def _probe_python(runner: Runner) -> dict[str, Any]:
-    for label, argv in (
-        ("py-3", ("py", "-3", "--version")),
-        ("python", ("python", "--version")),
-        ("python3", ("python3", "--version")),
-    ):
-        r = runner(argv, timeout_sec=8)
-        if r.error == "executable_not_found" or r.returncode != 0:
+    """Find Python >=3.11; retain argv prefix; resolve sys.executable; skip WindowsApps."""
+    candidates: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("py-3", ("py", "-3")),
+        ("python", ("python",)),
+        ("python3", ("python3",)),
+    )
+    skipped_aliases: list[str] = []
+    for label, prefix in candidates:
+        ver_r = runner(prefix + ("--version",), timeout_sec=8)
+        if ver_r.error == "executable_not_found" or ver_r.timed_out:
             continue
-        text = (r.stdout or r.stderr or "").strip()
+        text = (ver_r.stdout or ver_r.stderr or "").strip()
         m = _PY_VER.search(text)
-        if not m:
+        if not m or not version_meets_min(m.group(1)):
+            continue
+        # Resolve real interpreter with SAME prefix (never drop -3 from py).
+        res = runner(
+            prefix
+            + (
+                "-c",
+                "import sys; print(sys.version.split()[0]); print(sys.executable)",
+            ),
+            timeout_sec=8,
+        )
+        if res.error or res.timed_out or res.returncode != 0:
+            continue
+        lines = [ln.strip() for ln in (res.stdout or "").splitlines() if ln.strip()]
+        if len(lines) < 2:
+            continue
+        ver2, exe = lines[0], lines[1]
+        if not _SYS_VER.match(ver2) or not version_meets_min(ver2):
+            continue
+        if is_windowsapps_alias_path(exe):
+            skipped_aliases.append(exe)
             continue
         return {
             "present": True,
+            "meets_min": True,
+            "min_required": "3.11",
             "label": label,
-            "version": m.group(1),
-            "note": "interpreter_found_companion_not_asserted",
+            "version": ver2,
+            "argv_prefix": list(prefix),
+            "executable": exe,
+            "note": "interpreter_ge_311_sys_executable_resolved",
+            "windowsapps_aliases_skipped": skipped_aliases,
         }
+    note = "no_python_311_plus_probe_matched"
+    if skipped_aliases:
+        note = "no_python_311_plus_probe_matched_windowsapps_aliases_skipped"
     return {
         "present": False,
+        "meets_min": False,
+        "min_required": "3.11",
         "label": None,
         "version": None,
-        "note": "no_python_probe_matched",
+        "argv_prefix": [],
+        "executable": None,
+        "note": note,
+        "windowsapps_aliases_skipped": skipped_aliases,
     }
 
 
-def _probe_venv(runner: Runner, *, python_label: str | None) -> dict[str, Any]:
-    if not python_label:
+def _probe_venv(runner: Runner, *, executable: str | None) -> dict[str, Any]:
+    if not executable:
         return {"present": False, "note": "skipped_no_python"}
-    # Map label to argv prefix
-    if python_label == "py-3":
-        prefix: tuple[str, ...] = ("py", "-3")
-    elif python_label == "python":
-        prefix = ("python",)
-    else:
-        prefix = ("python3",)
-    r = runner(prefix + ("-c", "import venv; print('venv_ok')"), timeout_sec=8)
+    if is_windowsapps_alias_path(executable):
+        return {"present": False, "note": "refused_windowsapps_alias"}
+    # Call resolved executable directly (argv prefix already applied when resolving).
+    r = runner((executable, "-c", "import venv; print('venv_ok')"), timeout_sec=8)
+    if r.timed_out:
+        return {"present": False, "note": "venv_probe_timeout"}
     if r.returncode == 0 and "venv_ok" in (r.stdout or ""):
         return {"present": True, "note": "stdlib_venv_import_ok"}
     return {"present": False, "note": "venv_import_failed_or_absent"}
 
 
 def _probe_companion_on_path(runner: Runner) -> dict[str, Any]:
-    """Presence only — never call `version` (first proof / absent package)."""
+    """Presence only — never call `version`."""
     for name in ("grok-bot-build-bridge", "grok-bot-build-bridge.exe"):
-        # where/where.exe on Windows; command -v via sh not used (no shell).
-        # Try Get-Command via powershell only on Windows; elsewhere which.
         if sys.platform.startswith("win"):
             ps = (
                 f"$c = Get-Command {name} -ErrorAction SilentlyContinue; "
                 "if ($null -eq $c) { Write-Output 'ABSENT' } "
+                "elseif (-not [string]$c.Source) { Write-Output 'UNKNOWN' } "
                 "else { Write-Output ('PRESENT:' + [string]$c.Source) }"
             )
             r = runner(
@@ -137,17 +251,21 @@ def _probe_companion_on_path(runner: Runner) -> dict[str, Any]:
             )
         else:
             r = runner(("which", name), timeout_sec=5)
-        if r.error == "executable_not_found":
+        if r.error == "executable_not_found" or r.timed_out:
             continue
         out = (r.stdout or "").strip()
+        if "UNKNOWN" in out:
+            return {
+                "status": "unknown",
+                "version": None,
+                "note": "command_found_but_source_unresolved_version_not_queried",
+            }
         if out.startswith("PRESENT:") or (r.returncode == 0 and out and "ABSENT" not in out):
             return {
                 "status": "present_on_path",
                 "version": None,
                 "note": "on_path_version_not_queried_in_prereq",
             }
-        if "ABSENT" in out or r.returncode != 0:
-            continue
     return {
         "status": "absent",
         "version": None,
@@ -164,40 +282,23 @@ def _probe_wsl(runner: Runner) -> dict[str, Any]:
             return {
                 "exe_present": True,
                 "distros": [],
+                "skipped_lines": [],
                 "stopped_present": False,
                 "never_auto_start": True,
                 "note": "wsl_list_timed_out",
+                "timed_out": True,
             }
-        rows = parse_wsl_list_verbose(r.stdout or "")
-        distros = []
-        stopped = False
-        for row in rows:
-            state = str(row.get("state") or "")
-            if state.lower() == "stopped":
-                stopped = True
-            distros.append(
-                {
-                    "name": row.get("name"),
-                    "state": state,
-                    "version": row.get("version"),
-                    "default": bool(row.get("default")),
-                    "note": (
-                        "stopped_ask_operator_before_start"
-                        if state.lower() == "stopped"
-                        else None
-                    ),
-                }
-            )
+        parsed = parse_wsl_list_with_skips(r.stdout or "")
         return {
             "exe_present": True,
-            "distros": distros,
-            "stopped_present": stopped,
+            **parsed,
             "never_auto_start": True,
             "note": "list_only_never_started_stopped",
         }
     return {
         "exe_present": False,
         "distros": [],
+        "skipped_lines": [],
         "stopped_present": False,
         "never_auto_start": True,
         "note": "wsl_exe_absent",
@@ -208,7 +309,7 @@ def collect_host_prereq(*, runner: Runner = run_argv) -> HostPrereqReport:
     kind = runtime_kind()
     notes = _base_notes(kind)
     python = _probe_python(runner)
-    venv = _probe_venv(runner, python_label=python.get("label"))
+    venv = _probe_venv(runner, executable=python.get("executable"))
     companion = _probe_companion_on_path(runner)
     wsl = _probe_wsl(runner)
     payload: dict[str, Any] = {
@@ -222,9 +323,9 @@ def collect_host_prereq(*, runner: Runner = run_argv) -> HostPrereqReport:
         "wsl": wsl,
         "secrets": "none_read_none_written",
         "next_operator_steps": [
-            "If python.present is false: operator installs Python 3.11+; re-run check.",
+            "If python.present is false or meets_min is false: operator installs Python 3.11+; avoid WindowsApps aliases; re-run check.",
             "If companion_cli.status is absent: after approval, install approved wheel into isolated venv (docs/LOCAL_EXEC.md).",
-            "If WSL distros are Stopped: ask operator to start; never auto-start.",
+            "If WSL distros are Stopped: ask operator to start; never auto-start. Skipped lines are not ready.",
             "When desired=both: also choose default_backend explicitly per routing rules.",
             "Webhook remains separate one-way notify; local exec is not a persistent watcher.",
         ],
@@ -237,60 +338,49 @@ def fixture_host_prereq_windows(
     wsl_list_text: str,
     python_version_text: str = "Python 3.12.0",
     companion_present: bool = False,
+    companion_status: str | None = None,
     venv_ok: bool = True,
 ) -> HostPrereqReport:
     """Deterministic Windows-shaped report for CI (no live host mutation)."""
     notes = _base_notes("windows_host")
     m = _PY_VER.search(python_version_text)
     py_ver = m.group(1) if m else None
-    rows = parse_wsl_list_verbose(wsl_list_text)
-    distros = []
-    stopped = False
-    for row in rows:
-        state = str(row.get("state") or "")
-        if state.lower() == "stopped":
-            stopped = True
-        distros.append(
-            {
-                "name": row.get("name"),
-                "state": state,
-                "version": row.get("version"),
-                "default": bool(row.get("default")),
-                "note": (
-                    "stopped_ask_operator_before_start"
-                    if state.lower() == "stopped"
-                    else None
-                ),
-            }
-        )
+    meets = bool(py_ver) and version_meets_min(py_ver)
+    parsed = parse_wsl_list_with_skips(wsl_list_text)
+    status = companion_status or ("present_on_path" if companion_present else "absent")
     payload: dict[str, Any] = {
         "schema_version": 1,
         "check_kind": "host_prereq_fixture",
         "runtime_kind": "windows_host",
         **notes,
         "python": {
-            "present": bool(py_ver),
+            "present": meets,
+            "meets_min": meets,
+            "min_required": "3.11",
             "label": "fixture",
-            "version": py_ver,
+            "version": py_ver if meets else None,
+            "argv_prefix": ["fixture"],
+            "executable": r"C:\Python312\python.exe" if meets else None,
             "note": "fixture_interpreter",
+            "windowsapps_aliases_skipped": [],
         },
-        "venv": {
-            "present": venv_ok,
-            "note": "fixture_venv",
-        },
+        "venv": {"present": venv_ok and meets, "note": "fixture_venv"},
         "companion_cli": {
-            "status": "present_on_path" if companion_present else "absent",
+            "status": status,
             "version": None,
             "note": (
                 "fixture_companion_present_version_not_asserted"
-                if companion_present
-                else "fixture_companion_absent"
+                if status == "present_on_path"
+                else (
+                    "fixture_companion_unknown"
+                    if status == "unknown"
+                    else "fixture_companion_absent"
+                )
             ),
         },
         "wsl": {
             "exe_present": True,
-            "distros": distros,
-            "stopped_present": stopped,
+            **parsed,
             "never_auto_start": True,
             "note": "fixture_list_only",
         },
