@@ -53,7 +53,7 @@ def test_windowsapps_alias_detection():
 
 
 def test_wsl_parse_skips_localized_and_spaced_names():
-    loc = "  NAME      STATE           VERSION\n* Ubuntu    Wird ausgeführt         2\n"
+    loc = "  NAME      STATE           VERSION\n* Ubuntu    Wird_ausgefuehrt         2\n"
     parsed = parse_wsl_list_with_skips(loc)
     assert parsed["distros"] == []
     assert parsed["skipped_lines"]
@@ -154,12 +154,15 @@ def test_ps1_selftest_mocks_wsl_localization_timeout_and_version_gate():
             "-SelfTest",
         ],
         capture_output=True,
-        text=True,
         timeout=60,
         cwd=str(ROOT),
     )
-    assert r.returncode == 0, r.stdout + r.stderr
-    data = json.loads(r.stdout.strip().splitlines()[-1])
+    out = r.stdout.decode("utf-8", errors="replace") if isinstance(r.stdout, (bytes, bytearray)) else (r.stdout or "")
+    err = r.stderr.decode("utf-8", errors="replace") if isinstance(r.stderr, (bytes, bytearray)) else (r.stderr or "")
+    assert r.returncode == 0, out + err
+    lines = [ln.strip() for ln in out.replace("\ufeff", "").splitlines() if ln.strip()]
+    assert lines, f"empty selftest stdout; stderr={err!r}"
+    data = json.loads(lines[-1])
     assert data["ok"] is True
 
 
@@ -177,13 +180,17 @@ def test_ps1_live_report_python_fields_on_windows_ci():
             str(PS1),
         ],
         capture_output=True,
-        text=True,
         timeout=90,
         cwd=str(ROOT),
         env={k: v for k, v in os.environ.items() if k != "BRIDGE_HOST_PREREQ_MOCK"},
     )
-    assert r.returncode == 0, r.stdout + r.stderr
-    data = json.loads(r.stdout)
+    out = r.stdout.decode("utf-8-sig", errors="replace") if isinstance(r.stdout, (bytes, bytearray)) else (r.stdout or "")
+    err = r.stderr.decode("utf-8", errors="replace") if isinstance(r.stderr, (bytes, bytearray)) else (r.stderr or "")
+    assert r.returncode == 0, out + err
+    # ConvertTo-Json may emit a single object; strip BOM/noise
+    payload = out.strip()
+    assert payload, f"empty live stdout; stderr={err!r}"
+    data = json.loads(payload)
     assert data["check_kind"] == "host_prereq_builtin"
     assert data["runtime_kind"] == "windows_host"
     # CI images ship real Python 3.12

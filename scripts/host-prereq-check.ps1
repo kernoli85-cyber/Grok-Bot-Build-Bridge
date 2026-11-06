@@ -380,7 +380,7 @@ function Get-WslProbe {
     }
     $filePath = [string]$wsl.Source
     if ([string]::IsNullOrWhiteSpace($filePath)) { $filePath = 'wsl.exe' }
-    # List only — never wsl -d (would auto-start stopped distros).
+    # List only - never wsl -d (would auto-start stopped distros).
     $raw = Invoke-BoundedProcess -FilePath $filePath -ArgumentList @('-l', '-v') -TimeoutSec 12
     if ($raw.timed_out) {
         return [ordered]@{
@@ -431,7 +431,7 @@ function New-HostPrereqReport {
         secrets = 'none_read_none_written'
         next_operator_steps = @(
             'If python.present is false or meets_min is false: install Python 3.11+ (operator-managed), avoid WindowsApps store aliases, then re-run this check.',
-            'If companion_cli.status is absent: after operator approval, install the approved wheel into an isolated venv (see docs/LOCAL_EXEC.md) — no curl|pipe, no global install.',
+            'If companion_cli.status is absent: after operator approval, install the approved wheel into an isolated venv (see docs/LOCAL_EXEC.md) - no curl|pipe, no global install.',
             'If wsl shows Stopped distros: ask the operator to start them; never auto-start. Skipped/unparsed lines are not treated as ready.',
             'Preserve webhook pairing as a separate one-way notify path; do not conflate with local exec.'
         )
@@ -455,8 +455,6 @@ function Invoke-HostPrereqSelfTest {
     }
 
     # WSL UTF-16 NULs + English row
-    $utf16 = [System.Text.Encoding]::Unicode.GetString(
-        [System.Text.Encoding]::Unicode.GetBytes("  NAME      STATE           VERSION`r`n* Ubuntu    Running         2`r`n")
     )
     # Simulate NUL-heavy decode path via ConvertFrom-CliBytes
     $bytes = [System.Text.Encoding]::Unicode.GetBytes("  NAME      STATE           VERSION`r`n* Ubuntu    Running         2`r`n")
@@ -467,7 +465,7 @@ function Invoke-HostPrereqSelfTest {
     }
 
     # Localized / unknown state must NOT invent readiness
-    $loc = "  NAME      STATE           VERSION`n* Ubuntu    Wird ausgeführt         2`n"
+    $loc = "  NAME      STATE           VERSION`n* Ubuntu    Wird_ausgefuehrt         2`n"
     $p2 = Parse-WslListVerboseText -Text $loc
     if ($p2.distros.Count -ne 0) { $failures += 'localized state should not parse as ready' }
     if ($p2.skipped_lines.Count -lt 1) { $failures += 'localized line should be skipped' }
@@ -492,16 +490,16 @@ function Invoke-HostPrereqSelfTest {
     if ($p5.distros.Count -ne 0) { $failures += 'header-only should yield no distros' }
 
     if ($failures.Count -gt 0) {
-        Write-Output (@{ ok = $false; failures = $failures } | ConvertTo-Json -Depth 4)
-        return 2
+        Write-Output (@{ ok = $false; failures = $failures } | ConvertTo-Json -Compress -Depth 6)
+        exit 2
     }
-    Write-Output (@{ ok = $true; selftest = 'host_prereq_ps1'; checks = 8 } | ConvertTo-Json)
-    return 0
+    Write-Output (@{ ok = $true; selftest = 'host_prereq_ps1'; checks = 8 } | ConvertTo-Json -Compress)
+    exit 0
 }
 
 if ($SelfTest) {
-    $code = Invoke-HostPrereqSelfTest
-    exit $code
+    Invoke-HostPrereqSelfTest
+    exit 1
 }
 
 $python = Get-PythonProbe
