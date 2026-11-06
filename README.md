@@ -38,6 +38,14 @@ python -m grok_bot_build_bridge.cli plan-demo
 
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
+## Job state / outbox (Slice 3)
+
+- Own SQLite DB (`--state-db` or platform user data dir), mode 0600
+- Versioned events (`schema_version=1`), correlation_id / event_id
+- Idempotent enqueue, leases, retries with injectable clock/jitter, dead-letter
+- `http_accepted` ≠ `bot_processed` (no false exactly-once)
+- CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
+
 ## Non-goals (this PR)
 
 - Live Windows/WSL probing subprocesses

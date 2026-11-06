@@ -7,7 +7,7 @@ from grok_bot_build_bridge.cli import main
 
 def test_cli_version(capsys):
     assert main(["version"]) == 0
-    assert capsys.readouterr().out.strip() == "0.2.0"
+    assert capsys.readouterr().out.strip() == "0.3.0"
 
 
 def test_cli_discover_demo(capsys):
@@ -33,3 +33,14 @@ def test_cli_discover_live(capsys):
     assert data["kind"] in {"none", "native_only", "wsl_only", "both"}
     assert "diagnostics" in data
     assert "host_note" in data
+
+
+def test_cli_jobs_demo(tmp_path, capsys):
+    db = tmp_path / "s.sqlite"
+    assert main(["jobs-demo", "--state-db", str(db), "--task-id", "cli-t1"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["simulated"] is True
+    assert data["job"]["status"] == "succeeded"
+    assert main(["jobs-status", "--state-db", str(db)]) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["jobs"][0]["task_id"] == "cli-t1"

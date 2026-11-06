@@ -34,3 +34,10 @@ Thumbs.db
 .coverage
 htmlcov/
 .tox/
+
+# App state DB (never commit)
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+.state/
+.bridge-state/

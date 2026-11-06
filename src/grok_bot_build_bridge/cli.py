@@ -10,6 +10,8 @@ from . import __version__
 from .discovery import classify_discovery, nonroot_ready
 from .models import DiscoveryReport
 from .adapter import discover_host
+from .state import DeliveryState, JobStatus, JobStore
+from .state.store import StoreError
 
 
 def _report_to_dict(report: DiscoveryReport) -> dict:
@@ -146,6 +148,110 @@ def cmd_plan_demo(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _store_from_args(args: argparse.Namespace) -> JobStore:
+    path = getattr(args, "state_db", None)
+    if path:
+        return JobStore(path)
+    return JobStore.open_default()
+
+
+def cmd_jobs_demo(args: argparse.Namespace) -> int:
+    """Simulated job lifecycle against a state DB — no grok, no webhook POST."""
+    store = _store_from_args(args)
+    job = store.enqueue_job(
+        task_id=args.task_id,
+        correlation_id=args.correlation_id or args.task_id,
+        backend=args.backend,
+        cwd=args.cwd,
+        max_attempts=args.max_attempts,
+    )
+    claimed = store.claim_job(job.task_id, owner="demo-worker")
+    running = store.mark_running(job.task_id, owner="demo-worker")
+    if args.fail:
+        final = store.mark_failed(job.task_id, error_code="demo_fail", retry=True)
+    else:
+        final = store.mark_succeeded(job.task_id)
+    tick = store.simulate_outbox_tick(transport_ok=True, bot_process=False)
+    payload = {
+        "simulated": True,
+        "note": "No grok execution and no webhook POST; outbox acks are fake.",
+        "state_db": str(store.db_path),
+        "job": {
+            "task_id": final.task_id,
+            "correlation_id": final.correlation_id,
+            "status": final.status.value,
+            "attempt": final.attempt,
+        },
+        "outbox_tick": tick,
+        "http_accepted_vs_bot_processed": (
+            "http_accepted means transport ack only; bot_processed is separate"
+        ),
+    }
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_jobs_status(args: argparse.Namespace) -> int:
+    store = _store_from_args(args)
+    jobs = store.list_jobs()
+    events = store.list_outbox()
+    json.dump(
+        {
+            "state_db": str(store.db_path),
+            "jobs": [
+                {
+                    "task_id": j.task_id,
+                    "correlation_id": j.correlation_id,
+                    "status": j.status.value,
+                    "attempt": j.attempt,
+                    "backend": j.backend,
+                }
+                for j in jobs
+            ],
+            "outbox": [
+                {
+                    "event_id": e.event_id,
+                    "task_id": e.task_id,
+                    "event_type": e.event_type,
+                    "delivery": e.delivery.value,
+                    "attempt": e.attempt,
+                    "schema_version": e.schema_version,
+                }
+                for e in events
+            ],
+            "note": "Status metadata only; prompts/transcripts are not stored by default.",
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_outbox_tick(args: argparse.Namespace) -> int:
+    """One-shot simulated outbox pass — not a daemon, not real HTTP."""
+    store = _store_from_args(args)
+    results = store.simulate_outbox_tick(
+        transport_ok=not args.fail_transport,
+        bot_process=args.bot_process,
+        limit=args.limit,
+    )
+    json.dump(
+        {
+            "simulated": True,
+            "state_db": str(store.db_path),
+            "results": results,
+            "note": "Fake acknowledgments only; does not POST webhooks.",
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -168,6 +274,33 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-demo",
         help="Print fixture-based job plan JSON (no grok execution)",
     ).set_defaults(func=cmd_plan_demo)
+
+    p_jobs = sub.add_parser(
+        "jobs-demo",
+        help="Simulated job+outbox lifecycle (no grok, no webhook POST)",
+    )
+    p_jobs.add_argument("--state-db", required=True, help="SQLite path (use a temp file)")
+    p_jobs.add_argument("--task-id", default="demo-task")
+    p_jobs.add_argument("--correlation-id", default=None)
+    p_jobs.add_argument("--backend", default="wsl")
+    p_jobs.add_argument("--cwd", default="/tmp/demo")
+    p_jobs.add_argument("--max-attempts", type=int, default=5)
+    p_jobs.add_argument("--fail", action="store_true", help="Simulate failure+requeue")
+    p_jobs.set_defaults(func=cmd_jobs_demo)
+
+    p_status = sub.add_parser("jobs-status", help="Inspect jobs/outbox in a state DB")
+    p_status.add_argument("--state-db", required=True)
+    p_status.set_defaults(func=cmd_jobs_status)
+
+    p_tick = sub.add_parser(
+        "outbox-tick",
+        help="One-shot SIMULATED outbox delivery (fake acks, no network)",
+    )
+    p_tick.add_argument("--state-db", required=True)
+    p_tick.add_argument("--fail-transport", action="store_true")
+    p_tick.add_argument("--bot-process", action="store_true")
+    p_tick.add_argument("--limit", type=int, default=50)
+    p_tick.set_defaults(func=cmd_outbox_tick)
     return p
 
 
