@@ -329,7 +329,10 @@ function Parse-WslListVerboseText {
 function Get-WslProbe {
     param(
         # Optional injection for self-test / CI mocks (raw text already decoded).
-        [string]$MockListText = $null,
+        # NOTE: do not type as [string]$x = $null - PowerShell coerces that to "" and
+        # would take the mock branch on every live call.
+        [Parameter()]
+        $MockListText = $null,
         [switch]$MockTimeout,
         [switch]$MockAbsent
     )
@@ -354,8 +357,8 @@ function Get-WslProbe {
             timed_out = $true
         }
     }
-    if ($null -ne $MockListText) {
-        $parsed = Parse-WslListVerboseText -Text $MockListText
+    if ($null -ne $MockListText -and $PSBoundParameters.ContainsKey('MockListText')) {
+        $parsed = Parse-WslListVerboseText -Text ([string]$MockListText)
         return [ordered]@{
             exe_present = $true
             distros = $parsed.distros
