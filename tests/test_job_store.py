@@ -209,10 +209,20 @@ def test_restart_recovery_same_db(tmp_path: Path):
 
 
 def test_db_mode_private(tmp_path: Path):
+    import sys
+    from grok_bot_build_bridge.state.paths import ensure_private_db_file
+
     store = make_store(tmp_path)
     store.enqueue_job(task_id="t1")
+    note = ensure_private_db_file(store.db_path)
     mode = store.db_path.stat().st_mode & 0o777
-    assert mode == 0o600
+    if sys.platform.startswith("win"):
+        # Honest: Windows does not provide POSIX 0600 semantics via chmod.
+        assert "windows_no_acl_claim" in note.guarantee
+        assert note.chmod_applied is False
+    else:
+        assert mode == 0o600
+        assert note.chmod_applied is True
 
 
 def test_simulated_transport_failure(tmp_path: Path):
