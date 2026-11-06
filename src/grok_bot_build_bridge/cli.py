@@ -17,6 +17,20 @@ from .transport.pump import pump_outbox
 from .transport.webhook import WebhookConfig, WebhookTransport, load_webhook_config
 from .runner import build_approved_plan, execute_one_shot
 from .process_control import capability_matrix
+from .bot_onboard_adapter import (
+    PlanContractError,
+    build_conversation_view,
+    conversation_view_to_dict,
+    parse_onboarding_plan_payload,
+    validate_operator_choices,
+)
+from .preferences import (
+    OperatorPreferences,
+    PreferenceError,
+    default_preferences_path,
+    load_preferences,
+    save_preferences,
+)
 from .onboarding import (
     onboarding_plan_to_dict,
     plan_onboarding,
@@ -494,6 +508,95 @@ def cmd_onboard(args: argparse.Namespace) -> int:
 
 
 
+def cmd_onboard_view(args: argparse.Namespace) -> int:
+    """Parse onboard plan JSON → conversation view (no writes)."""
+    raw = Path(args.plan_json).read_bytes() if args.plan_json else sys.stdin.buffer.read()
+    try:
+        plan = parse_onboarding_plan_payload(raw)
+        saved = None
+        saved_default = None
+        if args.prefs:
+            try:
+                prefs = load_preferences(Path(args.prefs))
+            except PreferenceError as exc:
+                json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+                sys.stdout.write("\n")
+                return 2
+            if prefs:
+                saved = prefs.desired
+                saved_default = prefs.default_backend
+        view = build_conversation_view(plan, saved_desired=saved, saved_default=saved_default)
+    except PlanContractError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump(conversation_view_to_dict(view), sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_prefs_show(args: argparse.Namespace) -> int:
+    path = Path(args.path) if args.path else default_preferences_path()
+    try:
+        prefs = load_preferences(path)
+    except PreferenceError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump(
+        {
+            "path": str(path),
+            "exists": prefs is not None,
+            "preferences": None
+            if prefs is None
+            else {
+                "schema_version": prefs.schema_version,
+                "desired": prefs.desired,
+                "default_backend": prefs.default_backend,
+                "discovery_kind_at_save": prefs.discovery_kind_at_save,
+                "notes": list(prefs.notes),
+            },
+            "note": "non-secret allowlisted fields only; no auth-ready claim",
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_prefs_save(args: argparse.Namespace) -> int:
+    """Explicit preference save — never called by read-only onboard."""
+    path = Path(args.path) if args.path else default_preferences_path()
+    try:
+        choices = validate_operator_choices(
+            desired=args.desired,
+            default_backend=args.default_backend,
+            discovery_kind=args.discovery_kind,
+        )
+        prefs = OperatorPreferences(
+            schema_version=1,
+            desired=choices.desired,  # type: ignore[arg-type]
+            default_backend=choices.default_backend,  # type: ignore[arg-type]
+            discovery_kind_at_save=choices.discovery_kind_at_choice,
+            notes=choices.notes,
+        )
+        meta = save_preferences(prefs, path, overwrite=bool(args.overwrite))
+    except (PlanContractError, PreferenceError) as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump({"saved": meta, "preferences": {
+        "desired": prefs.desired,
+        "default_backend": prefs.default_backend,
+        "discovery_kind_at_save": prefs.discovery_kind_at_save,
+        "notes": list(prefs.notes),
+    }}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -543,6 +646,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rejected: onboard cannot apply/write in this slice",
     )
     p_on.set_defaults(func=cmd_onboard)
+
+    p_ov = sub.add_parser(
+        "onboard-view",
+        help="Parse onboard plan JSON → Bot conversation view (stdin or --plan-json)",
+    )
+    p_ov.add_argument("--plan-json", default=None, help="Path to plan JSON (default stdin)")
+    p_ov.add_argument("--prefs", default=None, help="Optional preferences.json for stale hints")
+    p_ov.set_defaults(func=cmd_onboard_view)
+
+    p_ps = sub.add_parser("prefs-show", help="Show allowlisted non-secret preferences")
+    p_ps.add_argument("--path", default=None)
+    p_ps.set_defaults(func=cmd_prefs_show)
+
+    p_pw = sub.add_parser(
+        "prefs-save",
+        help="Explicit save of allowlisted preferences (refuses clobber without --overwrite)",
+    )
+    p_pw.add_argument("--desired", required=True, choices=["native", "wsl", "both"])
+    p_pw.add_argument("--default-backend", required=True, choices=["native", "wsl"])
+    p_pw.add_argument(
+        "--discovery-kind",
+        required=True,
+        choices=["none", "native_only", "wsl_only", "both"],
+    )
+    p_pw.add_argument("--path", default=None)
+    p_pw.add_argument("--overwrite", action="store_true")
+    p_pw.set_defaults(func=cmd_prefs_save)
 
     p_jobs = sub.add_parser(
         "jobs-demo",

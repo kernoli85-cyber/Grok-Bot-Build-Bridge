@@ -7,7 +7,7 @@ from grok_bot_build_bridge.cli import main
 
 def test_cli_version(capsys):
     assert main(["version"]) == 0
-    assert capsys.readouterr().out.strip() == "0.8.0"
+    assert capsys.readouterr().out.strip() == "0.9.0"
 
 
 def test_cli_discover_demo(capsys):

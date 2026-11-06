@@ -18,7 +18,7 @@ Discovery matrix: `none` | `native_only` | `wsl_only` | `both`. Root-default WSL
 
 - Pure Python **discovery parsing** (fixtures; no host mutation)
 - **Per-job routing** with path validation and **no silent fallback**
-- CLI: `version`, `discover` (live read-only probes), `discover-demo`, `plan-demo` (no installers; demos do not exec `grok` jobs)
+- CLI: `version`, `discover`, `onboard`, `onboard-view`, `prefs-show`/`prefs-save` (live read-only probes), `discover-demo`, `plan-demo` (no installers; demos do not exec `grok` jobs)
 - Legacy notify scripts under `legacy/notify/` (HTTPS webhook helper prototype)
 - Argv-only subprocess boundary (`safe_exec`) with timeouts; stopped WSL distros never auto-started
 - Deterministic unit tests with mocked subprocess (no network, no paid API)
@@ -40,6 +40,21 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
 
 
+
+
+## Bot onboarding adapter + preferences (Slice 9)
+
+- Strict `schema_version=1` plan ingest (`onboard-view`): rejects unknown schema / malformed / oversized; redacts sensitive keys; checklist is **display data** (`treat_as_shell=false`)
+- Choice descriptors separate **desired** (operator preference) vs **discovery_kind** vs **default_backend**
+- Explicit `prefs-save` / `prefs-show` for allowlisted non-secret preferences only (atomic write; no clobber without `--overwrite`); never auto-written by `onboard`
+- Draft skill recipe in-repo: `drafts/skills/grok-bot-build-bridge-einrichtung/SKILL.md` — **not** marketplace-installed; parent/owner decides global install
+- No fake auth-ready; no secret collection
+
+## Runner honesty
+
+- `runner-run` default is **dry-run** (no process). `--execute` runs an approved plan.
+- Automated tests spawn **`bridge-dummy` / `bridge-dummy-tree` only** — not the real Grok Build CLI and **not** paid model calls.
+- Real grok execution remains operator-gated (discovered executable + explicit `--execute`); production cancel remains **state-only**.
 
 ## Onboarding planner (Slice 8)
 
@@ -95,6 +110,6 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
 ## Non-goals (this PR)
 
-- Live Windows/WSL probing subprocesses
-- Marketplace plugin packaging / unattended daemon
+- Marketplace plugin packaging as done product
+- Unattended daemon / scheduled loops
 - Shared secrets or credential reads

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "grok-bot-build-bridge"
-version = "0.8.0"
+version = "0.9.0"
 description = "Discovery, routing, and companion scaffolding for Grok Bot ↔ Grok Build"
 readme = "README.md"
 requires-python = ">=3.11"
