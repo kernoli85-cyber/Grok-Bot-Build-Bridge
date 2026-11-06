@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/okern/.local/bin/balu-notify.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
