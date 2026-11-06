@@ -64,7 +64,7 @@ def test_cli_outbox_pump_dry_run(tmp_path, capsys):
 
 def test_cli_runner_dry_run(tmp_path, capsys):
     from pathlib import Path as P
-    dummy = P(__file__).parent / "fixtures" / "bridge-dummy"
+    dummy = P(__file__).parent / "fixtures" / "bridge-dummy.py"
     db = tmp_path / "s.sqlite"
     assert main([
         "runner-run",

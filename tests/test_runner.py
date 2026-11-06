@@ -13,7 +13,7 @@ from grok_bot_build_bridge.state.store import JobStore, StoreError
 from grok_bot_build_bridge.state.types import JobStatus
 
 FIX = Path(__file__).parent / "fixtures"
-DUMMY = FIX / "bridge-dummy"
+DUMMY = FIX / "bridge-dummy.py"
 
 
 def store(tmp_path: Path) -> JobStore:

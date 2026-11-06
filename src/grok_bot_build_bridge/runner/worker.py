@@ -129,8 +129,26 @@ def execute_one_shot(
             argv_preview=argv_preview,
         )
 
-    # Nonzero exit: treat as definitive failure of this attempt (not uncertain),
-    # but do not auto-requeue — operator uses explicit_retry.
+    # Negative exit without timeout often means OS-level abort/start failure —
+    # treat as uncertain (needs_review), not a clean failed attempt.
+    if result.returncode is not None and result.returncode < 0:
+        store.mark_needs_review(
+            plan.task_id, error_code=f"signal_or_abort_{result.returncode}", owner=owner
+        )
+        return RunOutcome(
+            dry_run=False,
+            task_id=plan.task_id,
+            status=JobStatus.NEEDS_REVIEW.value,
+            returncode=result.returncode,
+            timed_out=False,
+            error_code=f"signal_or_abort_{result.returncode}",
+            stdout_truncated=result.stdout_truncated,
+            stderr_truncated=result.stderr_truncated,
+            note="negative_exit_uncertain_needs_review_no_auto_requeue",
+            argv_preview=argv_preview,
+        )
+
+    # Positive nonzero: definitive failure of this attempt; no auto-requeue.
     store.mark_failed(
         plan.task_id,
         error_code=f"exit_{result.returncode}",

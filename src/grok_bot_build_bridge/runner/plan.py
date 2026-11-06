@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -169,10 +170,16 @@ def build_approved_plan(
     tokens.extend(str(x) for x in extra_args)
     _reject_forbidden(tokens)
 
-    if backend == "native":
+    name = Path(exe).name
+    needs_py_launcher = name.endswith(".py") or (
+        name.startswith("bridge-dummy") and sys.platform.startswith("win")
+    )
+    if needs_py_launcher and not name.endswith(".ps1"):
+        argv = (sys.executable, exe, *tokens)
+    elif backend == "native":
         argv = build_native_invocation(exe, tokens)
     else:
-        # WSL/Linux: direct executable path as argv0
+        # WSL/Linux: direct executable path as argv0 (shebang scripts OK on POSIX)
         argv = (exe, *tokens)
 
     return ApprovedExecutionPlan(
