@@ -40,5 +40,3 @@ pythonpath = ["src"]
 markers = [
   "slow: builds wheel / isolated venv (MCP e2e)",
 ]
-
-[tool.pytest.ini_options]
