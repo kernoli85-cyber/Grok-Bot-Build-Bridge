@@ -17,6 +17,11 @@ from .transport.pump import pump_outbox
 from .transport.webhook import WebhookConfig, WebhookTransport, load_webhook_config
 from .runner import build_approved_plan, execute_one_shot
 from .process_control import capability_matrix
+from .onboarding import (
+    onboarding_plan_to_dict,
+    plan_onboarding,
+    probe_pairing_metadata,
+)
 from .runner.plan import PlanError
 
 
@@ -419,6 +424,76 @@ def cmd_jobs_cancel(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_onboard(args: argparse.Namespace) -> int:
+    """Read-only onboarding plan. Dry-run always; never writes secrets or installs."""
+    if getattr(args, "apply", False):
+        json.dump(
+            {
+                "error": {
+                    "code": "apply_not_supported",
+                    "message": "onboard is read-only; no --apply writes in this slice",
+                }
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+
+    if args.live:
+        report, diags = discover_host()
+        probe_notes = []
+        for d in diags:
+            if d.timed_out:
+                probe_notes.append(f"probe_timeout:{d.step}")
+            elif d.error and d.error != "executable_not_found":
+                probe_notes.append(f"probe_error:{d.step}:{d.error}")
+            elif d.error == "executable_not_found":
+                probe_notes.append(f"probe_absent_tool:{d.step}")
+    else:
+        # Deterministic fixture path — same facts as discover-demo
+        from pathlib import Path as _P
+        from .discovery import classify_discovery, nonroot_ready
+
+        fix = _P(__file__).resolve().parents[2] / "tests" / "fixtures"
+        wsl_list = (fix / "wsl_list_v_running.txt").read_text(encoding="utf-8")
+        cand = nonroot_ready(
+            distro="Ubuntu",
+            user="okern",
+            uid=1000,
+            distro_state="Running",
+            grok_path="/home/okern/.local/bin/grok",
+            version_text="grok 1.0.70 (f50904eaee6c) [stable]",
+        )
+        report = classify_discovery(
+            native_path=None,
+            native_version_text=None,
+            wsl_list_text=wsl_list,
+            wsl_candidates=(cand,),
+        )
+        probe_notes = ["fixture_demo_no_host_mutation"]
+
+    pairing = probe_pairing_metadata(
+        Path(args.pairing_config) if args.pairing_config else None
+    )
+    plan = plan_onboarding(
+        report,
+        desired=args.desired,
+        pairing=pairing,
+        discovery_probe_notes=probe_notes,
+        dry_run=True,
+    )
+    payload = onboarding_plan_to_dict(plan)
+    payload["cli_note"] = (
+        "dry_run_default; Bot extension guided setup is product UX; "
+        "this CLI is diagnostic companion only"
+    )
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -441,6 +516,33 @@ def build_parser() -> argparse.ArgumentParser:
         "plan-demo",
         help="Print fixture-based job plan JSON (no grok execution)",
     ).set_defaults(func=cmd_plan_demo)
+
+    p_on = sub.add_parser(
+        "onboard",
+        help="Read-only onboarding plan JSON (dry-run; no installs/secrets/network)",
+    )
+    p_on.add_argument(
+        "--desired",
+        choices=["unset", "native", "wsl", "both"],
+        default="unset",
+        help="Explicit operator preference (default unset → needs_choice)",
+    )
+    p_on.add_argument(
+        "--live",
+        action="store_true",
+        help="Use live read-only discover_host (default: fixture demo facts)",
+    )
+    p_on.add_argument(
+        "--pairing-config",
+        default=None,
+        help="Path to webhook.json for existence check only (never read)",
+    )
+    p_on.add_argument(
+        "--apply",
+        action="store_true",
+        help="Rejected: onboard cannot apply/write in this slice",
+    )
+    p_on.set_defaults(func=cmd_onboard)
 
     p_jobs = sub.add_parser(
         "jobs-demo",

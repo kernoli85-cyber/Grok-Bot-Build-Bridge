@@ -1,6 +1,6 @@
 # Grok Bot-Build Bridge
 
-Companion scaffolding that connects **Grok Bot** (orchestration, webhooks, skills) with local **Grok Build** on Windows — **native PowerShell and/or WSL2**.
+Companion library/CLI scaffolding that connects **Grok Bot** (orchestration, webhooks, skills) with local **Grok Build** on Windows — **native PowerShell and/or WSL2**.
 
 This package does **not** silently install Grok Build or WSL, does **not** expose an arbitrary remote shell API, and does **not** execute `grok` from the demo CLI commands.
 
@@ -39,6 +39,16 @@ python -m grok_bot_build_bridge.cli plan-demo
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
 
+
+
+## Onboarding planner (Slice 8)
+
+- Reusable `plan_onboarding()` + structured JSON (`schema_version=1`) for future Bot skill
+- CLI `onboard` is **dry-run / read-only** diagnostic companion (default fixture facts; `--live` optional)
+- Missing `--desired` → `needs_choice` (never silent preference)
+- Pairing status via **file existence metadata only** — config present ≠ auth-ready; secrets never read
+- No installs, no WSL starts, no webhook POST, no secret writes
+- Local `webhook.json` under user config root retained; Bot vault / plugin packaging = future gates
 
 ## Windows Job Object demo (Slice 7)
 
