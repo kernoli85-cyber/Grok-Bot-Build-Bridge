@@ -9,6 +9,7 @@ from typing import Sequence
 from . import __version__
 from .discovery import classify_discovery, nonroot_ready
 from .models import DiscoveryReport
+from .adapter import discover_host
 
 
 def _report_to_dict(report: DiscoveryReport) -> dict:
@@ -65,6 +66,29 @@ def cmd_discover_demo(_args: argparse.Namespace) -> int:
         wsl_candidates=(cand,),
     )
     json.dump(_report_to_dict(report), sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Live read-only host discovery (argv-only probes). Graceful if tools absent."""
+    report, diags = discover_host()
+    payload = _report_to_dict(report)
+    payload["diagnostics"] = [
+        {
+            "step": d.step,
+            "returncode": d.returncode,
+            "timed_out": d.timed_out,
+            "error": d.error,
+            "detail": d.detail,
+        }
+        for d in diags
+    ]
+    payload["host_note"] = (
+        "Live probes are read-only; stopped WSL distros are not started; "
+        "no grok jobs executed; Linux hosts typically report native/wsl tools missing."
+    )
+    json.dump(payload, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 
@@ -132,6 +156,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("version", help="Print package version").set_defaults(func=cmd_version)
+    sub.add_parser(
+        "discover",
+        help="Live read-only Windows/WSL discovery (no installs, no grok jobs)",
+    ).set_defaults(func=cmd_discover)
     sub.add_parser(
         "discover-demo",
         help="Print fixture-based discovery JSON (no host changes)",

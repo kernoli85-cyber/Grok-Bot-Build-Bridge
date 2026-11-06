@@ -17,6 +17,15 @@ from .models import (
 )
 
 _VERSION_RE = re.compile(r"\bgrok\s+(\d+\.\d+\.\d+)\b", re.IGNORECASE)
+
+_SAFE_IDENTITY = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
+
+def is_safe_identity(value: str) -> bool:
+    """Distro/user names used in argv must be strict identities — no spaces/metachar."""
+    return bool(value) and bool(_SAFE_IDENTITY.match(value))
+
+
 _WSL_LIST_RE = re.compile(
     r"^(?P<star>\*)?\s*(?P<name>\S+)\s+(?P<state>Running|Stopped|Installing|Uninstalling)\s+(?P<ver>\d+)\s*$",
     re.IGNORECASE,
@@ -29,21 +38,33 @@ def parse_grok_version(text: str) -> str | None:
 
 
 def parse_wsl_list_verbose(text: str) -> list[dict[str, str | bool]]:
-    """Parse `wsl -l -v` style output into dicts (name, state, version, default)."""
+    """Parse `wsl -l -v` style output into dicts (name, state, version, default).
+
+    Accepts already-decoded text (including UTF-16→str with NULs stripped by caller).
+    Distro names that fail is_safe_identity are skipped (untrusted device metadata).
+    """
     rows: list[dict[str, str | bool]] = []
-    for raw in (text or "").splitlines():
+    cleaned = (text or "").replace("\x00", "").replace("\ufeff", "")
+    for raw in cleaned.splitlines():
         line = raw.strip()
-        if not line or line.lower().startswith("name"):
-            # skip header; tolerate UTF-16-ish leftovers already decoded by caller
+        if not line:
             continue
-        # normalize odd spaces from Windows console
+        # skip header (EN) and common localized leftovers that still start with NAME
+        low = line.lower()
+        if low.startswith("name") and "state" in low:
+            continue
+        if low == "name":
+            continue
         line = re.sub(r"\s+", " ", line)
         m = _WSL_LIST_RE.match(line)
         if not m:
             continue
+        name = m.group("name")
+        if not is_safe_identity(name):
+            continue
         rows.append(
             {
-                "name": m.group("name"),
+                "name": name,
                 "state": m.group("state").capitalize(),
                 "version": m.group("ver"),
                 "default": bool(m.group("star")),

@@ -18,9 +18,10 @@ Discovery matrix: `none` | `native_only` | `wsl_only` | `both`. Root-default WSL
 
 - Pure Python **discovery parsing** (fixtures; no host mutation)
 - **Per-job routing** with path validation and **no silent fallback**
-- CLI: `version`, `discover-demo`, `plan-demo` (plans only — no installers, no `grok` exec)
+- CLI: `version`, `discover` (live read-only probes), `discover-demo`, `plan-demo` (no installers; demos do not exec `grok` jobs)
 - Legacy notify scripts under `legacy/notify/` (HTTPS webhook helper prototype)
-- Deterministic unit tests (no network, no paid API)
+- Argv-only subprocess boundary (`safe_exec`) with timeouts; stopped WSL distros never auto-started
+- Deterministic unit tests with mocked subprocess (no network, no paid API)
 
 ## Develop
 
