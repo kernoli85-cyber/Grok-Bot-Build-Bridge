@@ -17,7 +17,7 @@ Same Grok Bot account ≠ always‑allow. A denied approval means **stop** (no p
 |------|---------|
 | `scripts/host-prereq-check.ps1` | **First proof** on Windows: built‑in commands only; works **before** the wheel is installed; does **not** assert companion version. |
 | Packaged copy: `grok_bot_build_bridge` → `resources/scripts/host-prereq-check.ps1` | Same script inside the wheel (`host-prereq-script` CLI). |
-| Wheel `grok_bot_build_bridge-*-py3-none-any.whl` | Companion CLI (discover/onboard/host-prereq/…). Built in CI / on BOX; **copied** to the host after approval — repo stays on BOX. |
+| Wheel `grok_bot_build_bridge-*-py3-none-any.whl` | Companion CLI (discover/onboard/host-prereq/…). Built in CI / on BOX; **copied** to the host after approval - repo stays on BOX. |
 | `drafts/skills/grok-bot-build-bridge-einrichtung/SKILL.md` | Portable Bot recipe (not marketplace‑installed by this PR). |
 
 **Evidence separation:** `host-prereq --fixture windows-*` is **CI/demo only**, not live host evidence. Installed‑wheel smoke tests prove packaging; they do **not** prove the operator's desktop.
@@ -38,7 +38,7 @@ After the parent obtains normal local‑exec approval on the selected `machineId
 powershell -NoProfile -NonInteractive -File .\host-prereq-check.ps1
 ```
 
-Expect JSON with `python.meets_min` for 3.11+, `companion_cli.status = absent` if the wheel is not installed yet — that is success for first proof, **not** a version assertion failure.
+Expect JSON with `python.meets_min` for 3.11+, `companion_cli.status = absent` if the wheel is not installed yet - that is success for first proof, **not** a version assertion failure.
 
 Optional after wheel install (still approved commands only):
 
@@ -47,6 +47,13 @@ grok-bot-build-bridge host-prereq
 ```
 
 ## Install / uninstall (operator, isolated venv)
+
+**Windows evidence (operator machine, 2026-11-06 Europe/Berlin):** isolated venv at
+`%LOCALAPPDATA%\\GrokBotBuildBridge\\venv` with wheel `grok_bot_build_bridge-0.15.2-py3-none-any.whl`
+(SHA256 `6876ce77f345a9f64a9790bfca5fa4f382528b6510d0b0e6ae1a2ccbd532a94d`). Companion is
+**venv-local** (`Scripts\\grok-bot-build-bridge.exe`); `host-prereq` companion probe is PATH-only,
+so status may remain `absent` unless that Scripts dir is on PATH - use the venv entrypoint explicitly.
+Live `discover` / `onboard --desired unset --live` do not write preferences.
 
 **No** `curl | sh`, **no** global `pip install` recommendation, **no** secrets in the bundle.
 
