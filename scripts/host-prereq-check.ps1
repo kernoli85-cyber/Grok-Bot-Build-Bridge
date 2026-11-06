@@ -41,15 +41,15 @@ function ConvertFrom-CliBytes {
     }
     if (($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) -or $hasNul) {
         try {
-            return [System.Text.Encoding]::Unicode.GetString($Bytes).Replace([char]0, '')
+            $s = [System.Text.Encoding]::Unicode.GetString($Bytes); return ($s -replace "`0", '')
         } catch {
-            return [System.Text.Encoding]::UTF8.GetString($Bytes).Replace([char]0, '')
+            $s = [System.Text.Encoding]::UTF8.GetString($Bytes); return ($s -replace "`0", '')
         }
     }
     if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
-        return [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes).Replace([char]0, '')
+        $s = [System.Text.Encoding]::BigEndianUnicode.GetString($Bytes); return ($s -replace "`0", '')
     }
-    return [System.Text.Encoding]::UTF8.GetString($Bytes).Replace([char]0, '')
+    $s = [System.Text.Encoding]::UTF8.GetString($Bytes); return ($s -replace "`0", '')
 }
 
 function Invoke-BoundedProcess {
@@ -288,7 +288,7 @@ function Parse-WslListVerboseText {
     $distros = @()
     $skipped = @()
     $stopped = $false
-    $cleaned = ($Text -replace "`0", '').Replace([char]0xFEFF, '')
+    $cleaned = ($Text.TrimStart([char]0xFEFF)) -replace "`0", ''
     foreach ($raw in ($cleaned -split "`n")) {
         $line = ($raw -replace '\r', '').Trim()
         if (-not $line) { continue }
