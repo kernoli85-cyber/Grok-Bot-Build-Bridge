@@ -1,4 +1,4 @@
-"""CLI skeleton: guided discovery presentation — no installers, no side effects."""
+"""CLI skeleton: guided discovery presentation - no installers, no side effects."""
 from __future__ import annotations
 
 import argparse
@@ -63,7 +63,7 @@ def _report_to_dict(report: DiscoveryReport) -> dict:
         ],
         "ready": sorted(report.ready_backends()),
         "onboarding": {
-            "none": "Offer Windows / WSL2 / both links only — do not auto-install",
+            "none": "Offer Windows / WSL2 / both links only - do not auto-install",
             "native_only": "Default native; WSL optional later",
             "wsl_only": "Default wsl; Native optional later",
             "both": "Ask default; per-job backend; never parallel-start",
@@ -72,7 +72,7 @@ def _report_to_dict(report: DiscoveryReport) -> dict:
 
 
 def cmd_discover_demo(_args: argparse.Namespace) -> int:
-    """Deterministic demo using packaged fixtures — no host probing."""
+    """Deterministic demo using packaged fixtures - no host probing."""
     from .resources import fixture_text
 
     wsl_list = fixture_text("wsl_list_v_running.txt")
@@ -125,7 +125,7 @@ def cmd_version(_args: argparse.Namespace) -> int:
 
 
 def cmd_plan_demo(_args: argparse.Namespace) -> int:
-    """Deterministic job-plan demo — validates routing contract, never shells out."""
+    """Deterministic job-plan demo - validates routing contract, never shells out."""
     from .models import JobRequest, RoutingError
     from .routing import plan_job
 
@@ -180,7 +180,7 @@ def _store_from_args(args: argparse.Namespace) -> JobStore:
 
 
 def cmd_jobs_demo(args: argparse.Namespace) -> int:
-    """Simulated job lifecycle against a state DB — no grok, no webhook POST."""
+    """Simulated job lifecycle against a state DB - no grok, no webhook POST."""
     store = _store_from_args(args)
     job = store.enqueue_job(
         task_id=args.task_id,
@@ -254,7 +254,7 @@ def cmd_jobs_status(args: argparse.Namespace) -> int:
 
 
 def cmd_outbox_tick(args: argparse.Namespace) -> int:
-    """One-shot simulated outbox pass — not a daemon, not real HTTP."""
+    """One-shot simulated outbox pass - not a daemon, not real HTTP."""
     store = _store_from_args(args)
     results = store.simulate_outbox_tick(
         transport_ok=not args.fail_transport,
@@ -277,7 +277,7 @@ def cmd_outbox_tick(args: argparse.Namespace) -> int:
 
 
 def cmd_outbox_pump(args: argparse.Namespace) -> int:
-    """Dry-run (default) or explicit --send webhook pump — no daemon."""
+    """Dry-run (default) or explicit --send webhook pump - no daemon."""
     store = _store_from_args(args)
     transport = None
     if args.config:
@@ -464,7 +464,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
             elif d.error == "executable_not_found":
                 probe_notes.append(f"probe_absent_tool:{d.step}")
     else:
-        # Deterministic packaged fixtures — same facts as discover-demo
+        # Deterministic packaged fixtures - same facts as discover-demo
         from .discovery import classify_discovery, nonroot_ready
         from .resources import fixture_text
 
@@ -507,7 +507,7 @@ def cmd_onboard(args: argparse.Namespace) -> int:
 
 
 def cmd_onboard_view(args: argparse.Namespace) -> int:
-    """Parse onboard plan JSON → conversation view (no writes)."""
+    """Parse onboard plan JSON -> conversation view (no writes)."""
     raw = Path(args.plan_json).read_bytes() if args.plan_json else sys.stdin.buffer.read()
     try:
         plan = parse_onboarding_plan_payload(raw)
@@ -564,7 +564,7 @@ def cmd_prefs_show(args: argparse.Namespace) -> int:
 
 
 def cmd_prefs_save(args: argparse.Namespace) -> int:
-    """Explicit preference save — never called by read-only onboard."""
+    """Explicit preference save - never called by read-only onboard."""
     path = Path(args.path) if args.path else default_preferences_path()
     try:
         choices = validate_operator_choices(
@@ -600,7 +600,7 @@ def cmd_skill_draft(_args: argparse.Namespace) -> int:
     from .resources import draft_skill_path_hint, draft_skill_text
 
     payload = {
-        "note": "repo/package draft only — not marketplace-installed; parent owns UpdateSkill",
+        "note": "repo/package draft only - not marketplace-installed; parent owns UpdateSkill",
         "repo_path_hint": draft_skill_path_hint(),
         "text": draft_skill_text(),
     }
@@ -645,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--desired",
         choices=["unset", "native", "wsl", "both"],
         default="unset",
-        help="Explicit operator preference (default unset → needs_choice)",
+        help="Explicit operator preference (default unset -> needs_choice)",
     )
     p_on.add_argument(
         "--live",
@@ -666,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_ov = sub.add_parser(
         "onboard-view",
-        help="Parse onboard plan JSON → Bot conversation view (stdin or --plan-json)",
+        help="Parse onboard plan JSON -> Bot conversation view (stdin or --plan-json)",
     )
     p_ov.add_argument("--plan-json", default=None, help="Path to plan JSON (default stdin)")
     p_ov.add_argument("--prefs", default=None, help="Optional preferences.json for stale hints")

@@ -132,6 +132,8 @@ def test_isolated_venv_install_smoke_and_prefs_untouched(built_artifacts, tmp_pa
     env = os.environ.copy()
     # Clear PYTHONPATH so site-packages wheel is used
     env.pop("PYTHONPATH", None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
     if sys.platform.startswith("win"):
         env["LOCALAPPDATA"] = str(cfg)
     else:

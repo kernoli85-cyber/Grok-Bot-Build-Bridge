@@ -40,9 +40,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Build sdist and wheel (no publish)
+      - name: Install build + test deps
         run: |
           python -m pip install --upgrade pip build
+          python -m pip install -e ".[dev]"
+      - name: Build sdist and wheel (no publish)
+        run: |
           python -m build
       - name: Record artifact checksums
         shell: bash
