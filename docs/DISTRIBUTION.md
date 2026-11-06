@@ -49,3 +49,35 @@ CI records wheel/sdist filenames and SHA-256 of built artifacts for that run. Bi
 ## Webhook SSRF (v0.12+)
 
 Client-side protection only (does not bypass OS/network controls): DNS resolve-once with deadline, reject mixed/non-global answers, TCP pin to approved IP, TLS verify with original hostname (SNI/Host). Residual risk if the OS resolver itself is malicious is out of scope for this library.
+
+
+## Bounded MCP facade (v0.13+) — stdio on Bot BOX
+
+Optional extra: `pip install 'grok-bot-build-bridge[mcp]'` (official MCP Python SDK `mcp>=1.28,<2`).
+
+```bash
+grok-bot-build-bridge mcp-stdio
+# or: grok-bot-build-bridge-mcp
+```
+
+- **Transport:** stdio only from this entrypoint. No network listener, no accidental bind, no hosting cost.
+- **Tools (read-only):** `bridge_runtime_info`, `bridge_discover`, `bridge_onboard`, `bridge_status`, `bridge_job_status`.
+- **Not exposed:** shell, write, execute, enqueue, outbox-send, secret-read, cancel.
+- **State:** server-scoped via env `GROK_BOT_BUILD_BRIDGE_MCP_STATE_DIR` (absolute directory); DB filename fixed as `state.sqlite`. Tool args cannot pass arbitrary paths. Missing DB is reported; MCP does not create it on query.
+- **Runtime honesty:** responses include `runtime_location` (`box_or_linux` / `windows_host` / …). Callers must not assume the user's Windows host. Live discovery on Linux BOX is expected to find none.
+- **Stdout:** MCP JSON-RPC wire only; logs go to stderr (sanitized).
+- **Authority:** tool outputs are data only — no inheritance of install/execute/send authority from returned JSON.
+
+### AddMcpServer / registration (future — not done in this PR)
+
+Parent-confirmed product capability (remote **HTTPS** URL **or** local **stdio** command/args/env running on the **Bot BOX**, not the user's Windows host; `SearchPlugins` required before add; explicit question widget; `tls.caBundle` for private CA).
+
+- BOX stdio companion tools therefore do **not** require public hosting or Tailscale to expose tools *to agents that share the BOX*.
+- Reachability of the **user's Windows/WSL Build** remains a separate problem (hosted path, Tailscale, or webhook/companion on the host).
+- This PR does **not** call `AddMcpServer`, mutate account connectors, or register anything. Future account confirmation needed: SearchPlugins → explicit user question widget → AddMcpServer with BOX stdio command pointing at `grok-bot-build-bridge-mcp` (or remote HTTPS only if safely hosted without accidental bind).
+
+This executor's live `GetDynamicTools(cursor)` catalog search did **not** list `AddMcpServer` (may be parent/gated). Do not claim unavailable for the product; do not register from this PR either.
+
+## Generally installable app vs private skill
+
+User goal: generally installable app (Connect apps / MCP facade path), **not** a private skill as the product end-state. Private skill remains an interim operator aid only.

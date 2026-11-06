@@ -610,6 +610,31 @@ def cmd_skill_draft(_args: argparse.Namespace) -> int:
 
 
 
+def cmd_mcp_stdio(_args: argparse.Namespace) -> int:
+    """Run bounded read-only MCP server over stdio (official SDK). No bind."""
+    try:
+        from .mcp_facade.server import run_stdio
+    except ImportError as exc:
+        json.dump(
+            {
+                "error": {
+                    "code": "mcp_extra_missing",
+                    "message": (
+                        "Install optional extra: pip install 'grok-bot-build-bridge[mcp]' "
+                        f"({exc})"
+                    ),
+                }
+            },
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+    run_stdio()
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -769,6 +794,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_cancel.add_argument("--state-db", required=True)
     p_cancel.add_argument("--task-id", required=True)
     p_cancel.set_defaults(func=cmd_jobs_cancel)
+    sub.add_parser(
+        "mcp-stdio",
+        help=(
+            "Bounded read-only MCP stdio server (discover/onboard/status/job-status); "
+            "requires optional [mcp] extra; never binds a port"
+        ),
+    ).set_defaults(func=cmd_mcp_stdio)
+
     return p
 
 

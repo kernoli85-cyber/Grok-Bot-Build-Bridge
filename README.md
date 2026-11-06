@@ -117,6 +117,10 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - `http_accepted` ≠ `bot_processed` (no false exactly-once)
 - CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
 
+## Bounded MCP stdio facade (Slice 13 / v0.13.0)
+
+Optional `[mcp]` extra using the official MCP Python SDK (FastMCP / stdio). Read-only tools: discover, onboard, status, job-status. No shell/execute/enqueue/outbox-send/secret/cancel. Server-scoped state path only. Honest `box_or_linux` runtime marker. Integration tests cover real MCP initialize/list_tools/call_tool over subprocess stdio (including wheel install). **No** `AddMcpServer` registration in this PR — see `docs/DISTRIBUTION.md`.
+
 ## DNS-pinned webhook SSRF (Slice 12 / v0.12.0)
 
 Webhook HTTPS now **resolves once** (deadline-bounded), **rejects mixed/non-global** answers (private, loopback, link-local, IPv4-mapped-to-non-global, IPv6 zone), **connects to a pinned approved IP**, and keeps the **original hostname** for TLS SNI, certificate verification, and `Host`. Env proxies and redirects remain suppressed; verification is never disabled. Errors are sanitized codes (no IP/token leak).
