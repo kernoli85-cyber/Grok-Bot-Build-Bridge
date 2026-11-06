@@ -81,3 +81,42 @@ This executor's live `GetDynamicTools(cursor)` catalog search did **not** list `
 ## Generally installable app vs private skill
 
 User goal: generally installable app (Connect apps / MCP facade path), **not** a private skill as the product end-state. Private skill remains an interim operator aid only.
+
+
+## Authenticated streamable-HTTP MCP (v0.14+) — ASGI factory only
+
+```bash
+# Configure (example — use a token file in production; never commit secrets)
+export GROK_BOT_BUILD_BRIDGE_MCP_BEARER_TOKEN_FILE=/absolute/path/to/bearer
+export GROK_BOT_BUILD_BRIDGE_MCP_RESOURCE_URL=https://mcp.example.example/mcp
+export GROK_BOT_BUILD_BRIDGE_MCP_ALLOWED_HOSTS=mcp.example.example
+export GROK_BOT_BUILD_BRIDGE_MCP_ALLOWED_ORIGINS=https://cursor.com   # optional; empty = no browser Origin allowed when present
+grok-bot-build-bridge mcp-http-check   # dry-run only — never binds
+```
+
+Python API: `create_streamable_http_app()` returns an ASGI app (official MCP Streamable HTTP). **This package does not start a network listener** in v0.14.
+
+### Auth model (honest)
+
+- **Static bearer** via `Authorization: Bearer …` only (env or absolute token file). Fail-closed if unset.
+- Constant-time compare; duplicate/malformed Authorization and credentials in query are rejected.
+- Tokens never accepted from URL/query; responses/errors must not echo the secret.
+- Official SDK `AuthSettings` still needs `issuer_url` / `resource_server_url` for WWW-Authenticate / protected-resource metadata when `token_verifier` is enabled. That is **SDK metadata scaffolding**, not marketplace OAuth and not an authorization server we run. AddMcpServer-style **static headers** are the supported client path here; do not invent OAuth client registration.
+
+### Transport security
+
+- Host + Origin allowlists; **no wildcards by default**.
+- No CORS `*`.
+- Request body / session caps set on the factory.
+- **Do not trust** `X-Forwarded-*` from arbitrary clients. Only a trusted reverse proxy may terminate TLS and set `Host`.
+- Cleartext `http://` resource/issuer URLs are refused unless loopback + explicit `GROK_BOT_BUILD_BRIDGE_MCP_ALLOW_INSECURE_LOOPBACK=1` (local tests only).
+
+### Deployment choices that require the user (not automated here)
+
+Once this ASGI app is ready, **you** must choose how agents reach it:
+
+1. **Private network / Tailscale** — run the ASGI app on an HTTPS endpoint only reachable on your tailnet (or similar); point AddMcpServer at that HTTPS URL + Authorization header. No public internet.
+2. **Tunnel** (e.g. operator-managed tunnel to BOX/host) — still terminate **HTTPS** at a trusted edge; never expose cleartext non-loopback.
+3. **Public hosting** — deploy behind a public HTTPS reverse proxy / private CA as appropriate; manage DNS, certs, and the static bearer as account secrets.
+
+This PR does **not** register AddMcpServer, open ports, buy hosting, or change Windows/WSL hosts.

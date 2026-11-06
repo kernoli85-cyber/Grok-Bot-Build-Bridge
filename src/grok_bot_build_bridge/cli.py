@@ -610,6 +610,25 @@ def cmd_skill_draft(_args: argparse.Namespace) -> int:
 
 
 
+def cmd_mcp_http_check(_args: argparse.Namespace) -> int:
+    """Validate streamable-HTTP MCP config; never binds a listener."""
+    try:
+        from .mcp_facade.http_config import check_http_config
+    except ImportError as exc:
+        json.dump(
+            {"ok": False, "error": {"code": "import_error", "message": str(exc)}, "listener": False},
+            sys.stdout,
+            indent=2,
+        )
+        sys.stdout.write("\n")
+        return 2
+    payload = check_http_config()
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0 if payload.get("ok") else 2
+
+
+
 def cmd_mcp_stdio(_args: argparse.Namespace) -> int:
     """Run bounded read-only MCP server over stdio (official SDK). No bind."""
     try:
@@ -794,6 +813,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_cancel.add_argument("--state-db", required=True)
     p_cancel.add_argument("--task-id", required=True)
     p_cancel.set_defaults(func=cmd_jobs_cancel)
+    sub.add_parser(
+        "mcp-http-check",
+        help=(
+            "Dry-run validate authenticated MCP streamable-HTTP config "
+            "(static bearer + Host/Origin); never starts a listener"
+        ),
+    ).set_defaults(func=cmd_mcp_http_check)
+
     sub.add_parser(
         "mcp-stdio",
         help=(

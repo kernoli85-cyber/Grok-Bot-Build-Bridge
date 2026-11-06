@@ -117,6 +117,10 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - `http_accepted` ≠ `bot_processed` (no false exactly-once)
 - CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
 
+## Authenticated MCP streamable HTTP (Slice 14 / v0.14.0)
+
+ASGI app factory with static-bearer auth + Host/Origin allowlists (official MCP SDK Streamable HTTP). CLI `mcp-http-check` only — **no listener**. In-process ASGI tests; see `docs/DISTRIBUTION.md` for deployment choices (private network / tunnel / public HTTPS) that require the user.
+
 ## Bounded MCP stdio facade (Slice 13 / v0.13.0)
 
 Optional `[mcp]` extra using the official MCP Python SDK (FastMCP / stdio). Read-only tools: discover, onboard, status, job-status. No shell/execute/enqueue/outbox-send/secret/cancel. Server-scoped state path only. Honest `box_or_linux` runtime marker. Integration tests cover real MCP initialize/list_tools/call_tool over subprocess stdio (including wheel install). **No** `AddMcpServer` registration in this PR — see `docs/DISTRIBUTION.md`.
