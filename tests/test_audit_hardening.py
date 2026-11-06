@@ -179,3 +179,23 @@ def test_docs_do_not_claim_cursor_plugin_equals_grok_bot():
         Path(__file__).resolve().parents[1] / "drafts" / "plugin" / "README.md"
     ).read_text(encoding="utf-8")
     assert "same approved Cursor marketplace plugins" not in plugin_readme
+
+
+def test_prompt_metachar_allowed_via_single_but_cwd_still_blocked(tmp_path: Path):
+    exe = tmp_path / "grok.exe"
+    exe.write_bytes(b"MZ")
+    from grok_bot_build_bridge.runner.plan import build_approved_plan, build_native_invocation, PlanError
+
+    plan = build_approved_plan(
+        task_id="t",
+        backend="native",
+        cwd=str(tmp_path),
+        executable=str(exe),
+        prompt="do X & Y | Z",
+        force_prompt_argv=True,
+        prompt_via_stdin=False,
+    )
+    assert "do X & Y | Z" in plan.argv
+    with pytest.raises(PlanError) as ei:
+        build_native_invocation(str(exe), ["--cwd", "C:\\work & calc"])
+    assert ei.value.code == "argv_metachar"

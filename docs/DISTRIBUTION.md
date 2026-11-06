@@ -44,3 +44,8 @@ Fetched from official Cursor/Grok Bot help (not third-party blogs):
 ## Reproducibility
 
 CI records wheel/sdist filenames and SHA-256 of built artifacts for that run. Bit-for-bit reproducibility across OS/toolchains is **not** claimed unless measured equal hashes are reported for the same commit on both OS jobs (see packaging job logs).
+
+
+## Webhook SSRF (v0.12+)
+
+Client-side protection only (does not bypass OS/network controls): DNS resolve-once with deadline, reject mixed/non-global answers, TCP pin to approved IP, TLS verify with original hostname (SNI/Host). Residual risk if the OS resolver itself is malicious is out of scope for this library.

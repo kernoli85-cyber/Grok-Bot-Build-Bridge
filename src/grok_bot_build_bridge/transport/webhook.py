@@ -3,9 +3,12 @@
 Secure defaults:
 - HTTPS only, no URL userinfo
 - Never follow redirects (Bearer must not hop)
-- Default TLS verification
+- Default TLS verification (never CERT_NONE)
+- DNS resolve-once with deadline; reject mixed/non-global answers; pin IP for TCP
+  while preserving original hostname for SNI / cert verify / Host
+- Env HTTP(S)_PROXY suppressed; no redirect relaxation
 - Bounded connect/read timeouts + max response body
-- Sanitized errors (no URL/key leakage)
+- Sanitized errors (no URL/key/IP leakage in SSRF codes)
 - 2xx => http_accepted only (NOT bot_processed)
 - 401/403 => permanent; 429/5xx/network => transient (Retry-After bounded)
 """
@@ -21,7 +24,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
-import ipaddress
+
+from .ssrf import build_pinned_opener, host_blocked_for_webhook
 
 from ..state.paths import ensure_private_file, user_config_root
 
@@ -67,33 +71,6 @@ class TransportResult:
     sanitized_error: str | None = None
 
 
-def _host_blocked_for_webhook(hostname: str) -> bool:
-    """Block loopback/link-local/private/metadata literal targets (SSRF harden).
-
-    Residual risk: public DNS names that resolve to private IPs are not fully
-    closed without a custom resolver; document that limitation honestly.
-    """
-    h = (hostname or "").lower().rstrip(".")
-    if not h:
-        return True
-    if h in {"localhost", "metadata", "metadata.google.internal"}:
-        return True
-    if h.endswith(".localhost") or h.endswith(".local"):
-        return True
-    try:
-        ip = ipaddress.ip_address(h)
-    except ValueError:
-        return False
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_reserved
-        or ip.is_multicast
-        or ip.is_unspecified
-    )
-
-
 def validate_webhook_url(url: str) -> str:
     if not url or not isinstance(url, str):
         raise ValueError("url_empty")
@@ -105,7 +82,7 @@ def validate_webhook_url(url: str) -> str:
         raise ValueError("url_userinfo_forbidden")
     if not parsed.hostname:
         raise ValueError("url_host_required")
-    if _host_blocked_for_webhook(parsed.hostname):
+    if host_blocked_for_webhook(parsed.hostname):
         raise ValueError("url_host_forbidden")
     if parsed.scheme.lower() == "https" and raw.lower().startswith("https://"):
         return raw
@@ -254,13 +231,7 @@ class WebhookTransport:
             self._opener = opener
         else:
             ctx = ssl.create_default_context()
-            https = urllib.request.HTTPSHandler(context=ctx)
-            # Pass empty ProxyHandler so build_opener skips the DEFAULT ProxyHandler
-            # that would honor HTTP(S)_PROXY / getproxies() (Bearer must not hop via
-            # an unexpected proxy). An empty ProxyHandler may not remain in
-            # opener.handlers (no *_open methods), but the default is still suppressed.
-            proxy = urllib.request.ProxyHandler({})
-            self._opener = urllib.request.build_opener(proxy, https, NoRedirect)
+            self._opener = build_pinned_opener(context=ctx)
 
     def send_event_payload(self, payload: dict[str, Any]) -> TransportResult:
         """POST JSON status payload. Never includes bearer in returned errors."""
@@ -276,7 +247,8 @@ class WebhookTransport:
                 "Accept": "application/json, text/plain, */*",
             },
         )
-        timeout = (self.connect_timeout, self.read_timeout)
+        # Single float: http.client does not accept (connect, read) tuples.
+        timeout = float(self.connect_timeout) + float(self.read_timeout)
         try:
             with self._opener.open(req, timeout=timeout) as resp:
                 status = int(getattr(resp, "status", None) or resp.getcode())
@@ -321,8 +293,13 @@ class WebhookTransport:
         except TimeoutError:
             return TransportResult(kind="transient", sanitized_error="timeout")
         except urllib.error.URLError as exc:
+            code = getattr(exc, "ssrf_code", None)
+            if isinstance(code, str) and code:
+                kind = "permanent" if code.startswith("dns_") or code.endswith("_forbidden") else "transient"
+                if code in {"dns_timeout", "connect_deadline", "connect_failed"}:
+                    kind = "transient"
+                return TransportResult(kind=kind, sanitized_error=sanitize_error(code))
             reason = sanitize_error(str(getattr(exc, "reason", exc)))
-            # timeouts often wrap as URLError
             low = reason.lower()
             if "timed out" in low or "timeout" in low:
                 return TransportResult(kind="transient", sanitized_error="timeout")

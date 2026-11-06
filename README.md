@@ -117,6 +117,12 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - `http_accepted` ≠ `bot_processed` (no false exactly-once)
 - CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
 
+## DNS-pinned webhook SSRF (Slice 12 / v0.12.0)
+
+Webhook HTTPS now **resolves once** (deadline-bounded), **rejects mixed/non-global** answers (private, loopback, link-local, IPv4-mapped-to-non-global, IPv6 zone), **connects to a pinned approved IP**, and keeps the **original hostname** for TLS SNI, certificate verification, and `Host`. Env proxies and redirects remain suppressed; verification is never disabled. Errors are sanitized codes (no IP/token leak).
+
+Argv metachar rules refined: freeform `--single` prompts may contain `&`/`|`; structural tokens (`--cwd`, etc.) still refuse shell metacharacters; `.cmd`/`.bat` still refused.
+
 ## Audit hardening (Slice 11 / v0.11.0)
 
 Security/correctness fixes from a source-level audit (not another feature demo):

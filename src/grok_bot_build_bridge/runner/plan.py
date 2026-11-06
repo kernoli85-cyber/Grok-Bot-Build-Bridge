@@ -111,10 +111,35 @@ def _validate_executable_path(path: str) -> str:
     return p
 
 
+
+def _reject_structural_argv_metachar(tokens: Sequence[str]) -> None:
+    """Refuse shell metacharacters in structural argv tokens.
+
+    The freeform prompt immediately after ``--single`` is exempt (prompts may
+    contain ``&`` / ``|`` etc.). Control characters are always refused.
+    ``%`` is not banned: ``.cmd``/``.bat`` are already refused, and argv-only
+    CreateProcess does not expand percent-vars.
+    """
+    skip_next = False
+    for tok in tokens:
+        s = str(tok)
+        if any(ord(ch) < 32 for ch in s):
+            raise PlanError("argv_control_char", "control characters in argv refused")
+        if skip_next:
+            skip_next = False
+            continue
+        if s == "--single":
+            skip_next = True
+            continue
+        if any(ch in s for ch in ("|", ";", "&", ">", "<", "`")):
+            raise PlanError("argv_metachar", "metacharacters in structural argv refused")
+
+
 def build_native_invocation(executable: str, extra: Sequence[str]) -> tuple[str, ...]:
     """Build argv for native Windows helpers without shell injection."""
     _reject_forbidden(extra)
     exe = _validate_executable_path(executable)
+    _reject_structural_argv_metachar(extra)
     low = exe.lower()
     if low.endswith(".ps1"):
         # -File takes the script path as a single literal argument
@@ -133,12 +158,6 @@ def build_native_invocation(executable: str, extra: Sequence[str]) -> tuple[str,
             "cmd_bat_refused",
             "grok.cmd/.bat refused; use grok.exe or grok.ps1 via -File (no cmd.exe)",
         )
-    for tok in extra:
-        s = str(tok)
-        if any(ch in s for ch in ("|", ";", "&", ">", "<", "`", "%")):
-            raise PlanError("argv_metachar", "metacharacters in argv token refused")
-        if any(ord(ch) < 32 for ch in s):
-            raise PlanError("argv_control_char", "control characters in argv refused")
     return (exe, *tuple(str(x) for x in extra))
 
 
