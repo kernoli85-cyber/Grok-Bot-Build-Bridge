@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from urllib.parse import urlparse
+import ipaddress
 
 from ..state.paths import ensure_private_file, user_config_root
 
@@ -66,6 +67,33 @@ class TransportResult:
     sanitized_error: str | None = None
 
 
+def _host_blocked_for_webhook(hostname: str) -> bool:
+    """Block loopback/link-local/private/metadata literal targets (SSRF harden).
+
+    Residual risk: public DNS names that resolve to private IPs are not fully
+    closed without a custom resolver; document that limitation honestly.
+    """
+    h = (hostname or "").lower().rstrip(".")
+    if not h:
+        return True
+    if h in {"localhost", "metadata", "metadata.google.internal"}:
+        return True
+    if h.endswith(".localhost") or h.endswith(".local"):
+        return True
+    try:
+        ip = ipaddress.ip_address(h)
+    except ValueError:
+        return False
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    )
+
+
 def validate_webhook_url(url: str) -> str:
     if not url or not isinstance(url, str):
         raise ValueError("url_empty")
@@ -77,6 +105,8 @@ def validate_webhook_url(url: str) -> str:
         raise ValueError("url_userinfo_forbidden")
     if not parsed.hostname:
         raise ValueError("url_host_required")
+    if _host_blocked_for_webhook(parsed.hostname):
+        raise ValueError("url_host_forbidden")
     if parsed.scheme.lower() == "https" and raw.lower().startswith("https://"):
         return raw
     raise ValueError("url_invalid")
@@ -225,7 +255,12 @@ class WebhookTransport:
         else:
             ctx = ssl.create_default_context()
             https = urllib.request.HTTPSHandler(context=ctx)
-            self._opener = urllib.request.build_opener(https, NoRedirect)
+            # Pass empty ProxyHandler so build_opener skips the DEFAULT ProxyHandler
+            # that would honor HTTP(S)_PROXY / getproxies() (Bearer must not hop via
+            # an unexpected proxy). An empty ProxyHandler may not remain in
+            # opener.handlers (no *_open methods), but the default is still suppressed.
+            proxy = urllib.request.ProxyHandler({})
+            self._opener = urllib.request.build_opener(proxy, https, NoRedirect)
 
     def send_event_payload(self, payload: dict[str, Any]) -> TransportResult:
         """POST JSON status payload. Never includes bearer in returned errors."""

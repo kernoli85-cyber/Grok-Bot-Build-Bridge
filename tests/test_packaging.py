@@ -104,7 +104,7 @@ def test_isolated_venv_install_smoke_and_prefs_untouched(built_artifacts, tmp_pa
         py = venv_dir / "bin" / "python"
         exe = venv_dir / "bin" / "grok-bot-build-bridge"
     # Install wheel only (no editable, no checkout on PYTHONPATH)
-    r = _run([str(py), "-m", "pip", "install", "--no-deps", str(wheel)])
+    r = _run([str(py), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel)], env={**os.environ, "PYTHONNOUSERSITE": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
 
     # Fake user config/data dirs so we never touch real home

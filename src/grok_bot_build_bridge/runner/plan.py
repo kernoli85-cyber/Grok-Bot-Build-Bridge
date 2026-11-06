@@ -10,6 +10,8 @@ from typing import Sequence
 
 from ..models import BackendId
 
+MAX_STDIN_BYTES = 64 * 1024
+
 FORBIDDEN_FLAG_SUBSTRINGS = (
     "--always-approve",
     "bypasspermissions",
@@ -95,6 +97,12 @@ def _validate_executable_path(path: str) -> str:
             "executable_not_allowed",
             "executable basename must be grok[.exe|.cmd|.ps1] or bridge-dummy*",
         )
+    low_name = name.lower()
+    if low_name.endswith(".cmd") or low_name.endswith(".bat"):
+        raise PlanError(
+            "cmd_bat_refused",
+            "grok.cmd/.bat refused due to cmd.exe argument reinterpretation risk",
+        )
     if not os.path.isfile(p) and not name.startswith("bridge-dummy"):
         # For grok, require exists; dummy may be script path that exists in tests
         raise PlanError("executable_not_found", "executable path does not exist")
@@ -121,10 +129,16 @@ def build_native_invocation(executable: str, extra: Sequence[str]) -> tuple[str,
             *tuple(str(x) for x in extra),
         )
     if low.endswith(".cmd") or low.endswith(".bat"):
-        # cmd /c with executable quoted as one argument — still argv list, not shell=True
-        # Using list form: cmd.exe /c ""path" arg1 arg2" is fragile; prefer calling via
-        # CreateProcess on the .cmd directly when possible (argv[0]=exe).
-        return (exe, *tuple(str(x) for x in extra))
+        raise PlanError(
+            "cmd_bat_refused",
+            "grok.cmd/.bat refused; use grok.exe or grok.ps1 via -File (no cmd.exe)",
+        )
+    for tok in extra:
+        s = str(tok)
+        if any(ch in s for ch in ("|", ";", "&", ">", "<", "`", "%")):
+            raise PlanError("argv_metachar", "metacharacters in argv token refused")
+        if any(ord(ch) < 32 for ch in s):
+            raise PlanError("argv_control_char", "control characters in argv refused")
     return (exe, *tuple(str(x) for x in extra))
 
 
@@ -170,6 +184,8 @@ def build_approved_plan(
         via_stdin = False
     elif prompt_via_stdin and prompt is not None:
         stdin = prompt.encode("utf-8")
+        if len(stdin) > MAX_STDIN_BYTES:
+            raise PlanError("prompt_too_large", "stdin prompt exceeds bound")
         via_stdin = True
     else:
         stdin = None

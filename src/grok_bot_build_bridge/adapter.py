@@ -20,7 +20,8 @@ from .models import BackendState, DiscoveryReport, NativeBackend, WslCandidate
 from .safe_exec import RunResult, run_argv
 
 # Fixed PowerShell lookup — no user-controlled interpolation into the script body.
-# Handles grok.exe / grok.cmd / grok.ps1 via Get-Command Source.
+# Discovers grok.exe / grok.cmd / grok.ps1 via Get-Command Source.
+# Note: ApprovedExecutionPlan refuses .cmd/.bat (cmd.exe reinterpretation); prefer .exe/.ps1.
 _NATIVE_LOOKUP_PS = (
     "$c = Get-Command grok -ErrorAction SilentlyContinue; "
     "if ($null -eq $c) { Write-Output 'NATIVE_GROK:NOT_FOUND'; exit 0 }; "

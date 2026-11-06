@@ -49,7 +49,7 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - Isolated venv install smoke on Ubuntu + Windows CI (entry point works outside checkout)
 - Packaged fixtures/skill text via `importlib.resources` (no `tests/` dependency after install)
 - Manual companion install vs Bot plugin documented in `docs/DISTRIBUTION.md`
-- Draft Cursor plugin layout: `drafts/plugin/` — **not** marketplace-submitted (gate: public repo + [marketplace publish](https://cursor.com/marketplace/publish) per [Cursor Plugins reference](https://cursor.com/docs/reference/plugins))
+- Draft Cursor plugin layout: `drafts/plugin/` — **not** marketplace-submitted; **do not assume** Cursor marketplace = Grok Bot install (see `docs/DISTRIBUTION.md`)
 
 ## Bot onboarding adapter + preferences (Slice 9)
 
@@ -116,6 +116,30 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 - Idempotent enqueue, leases, retries with injectable clock/jitter, dead-letter
 - `http_accepted` ≠ `bot_processed` (no false exactly-once)
 - CLI: `jobs-demo`, `jobs-status`, `outbox-tick` — **simulated** acks only (no webhook POST, no grok)
+
+## Audit hardening (Slice 11 / v0.11.0)
+
+Security/correctness fixes from a source-level audit (not another feature demo):
+
+- Webhook: refuse loopback/private/link-local/metadata literal hosts; empty `ProxyHandler` so `HTTP(S)_PROXY` cannot exfiltrate Bearer.
+- Execution plan: refuse `.cmd`/`.bat` (cmd.exe argument reinterpretation); reject argv metacharacters; bound stdin prompts.
+- `safe_exec`: bound stdin; allowlisted child env when extras are provided (runner path); refuse secret-like env keys.
+- Preferences: refuse symlink path/parent on load/save.
+- Job claim: `UPDATE ... WHERE status=queued` under `BEGIN IMMEDIATE` to fail closed on races.
+- Docs: official Grok Bot Connect apps ≠ proven Cursor marketplace install path (see `docs/DISTRIBUTION.md`).
+- E2E: fresh wheel → onboard → dummy job → mocked outbox receiver (`tests/test_e2e_wheel_workflow.py`).
+
+### Real runner vs dummy (precise)
+
+| Capability | Status |
+|------------|--------|
+| Discover native/WSL grok paths | Yes (probes) |
+| Approve immutable plan / argv-only exec | Yes |
+| Run `bridge-dummy*` fixtures | Yes (CI) |
+| Run real `grok` with `--execute` | Code path exists; **not** exercised with paid model in this PR |
+| Cancel = kill process tree | **No** — state-only; Job Object / POSIX demos are demos only |
+| Outbox webhook POST | Yes (HTTPS, no redirects, mocked in tests) |
+| Installable for all Grok Bot users as marketplace plugin | **Not verified** by official Grok Bot docs |
 
 ## Non-goals (this PR)
 

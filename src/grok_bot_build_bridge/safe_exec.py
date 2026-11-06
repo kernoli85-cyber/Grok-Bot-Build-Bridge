@@ -10,6 +10,27 @@ from typing import Mapping, Sequence
 
 DEFAULT_TIMEOUT_SEC = 15
 DEFAULT_MAX_STREAM_BYTES = 64 * 1024
+DEFAULT_MAX_STDIN_BYTES = 64 * 1024
+_CHILD_ENV_ALLOW = (
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "USERNAME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "COMSPEC",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+)
 
 
 @dataclass(frozen=True)
@@ -72,6 +93,26 @@ def _read_bounded(stream, limit: int, bucket: list) -> None:
     bucket.append((bytes(retained), truncated))
 
 
+
+def _child_env(extra: Mapping[str, str] | None) -> dict[str, str] | None:
+    """Minimal host env + explicit extras. Avoid forwarding full parent secrets.
+
+    When extra is None, return None so Popen inherits the current process env
+    (legacy diagnostic callers). When extra is provided (runner path), start from
+    an allowlisted subset then overlay extras; refuse secret-like keys.
+    """
+    if extra is None:
+        return None
+    base = {k: os.environ[k] for k in _CHILD_ENV_ALLOW if k in os.environ}
+    for k, v in dict(extra).items():
+        key = str(k)
+        low = key.lower()
+        if any(s in low for s in ("token", "secret", "password", "authorization", "api_key", "bearer")):
+            raise ValueError("env_key_forbidden")
+        base[key] = str(v)
+    return base
+
+
 def run_argv(
     argv: Sequence[str],
     *,
@@ -92,19 +133,24 @@ def run_argv(
         return RunResult((), -1, "", "", error="empty_argv")
     if max_stdout_bytes < 0 or max_stderr_bytes < 0:
         return RunResult(args, -1, "", "", error="invalid_stream_limit")
+    if stdin_bytes is not None and len(stdin_bytes) > DEFAULT_MAX_STDIN_BYTES:
+        return RunResult(args, -1, "", "", error="stdin_too_large")
 
     try:
+        child_env = _child_env(env)
         proc = subprocess.Popen(
             list(args),
             stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=cwd,
-            env=None if env is None else {**os.environ, **dict(env)},
+            env=child_env,
             shell=False,
         )
     except FileNotFoundError:
         return RunResult(args, -1, "", "", error="executable_not_found")
+    except ValueError as exc:
+        return RunResult(args, -1, "", "", error=str(exc) or "env_invalid")
     except OSError as exc:
         return RunResult(args, -1, "", "", error=type(exc).__name__)
 

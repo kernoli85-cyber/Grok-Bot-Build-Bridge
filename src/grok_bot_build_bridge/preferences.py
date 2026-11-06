@@ -107,6 +107,8 @@ def preferences_to_dict(prefs: OperatorPreferences) -> dict[str, Any]:
 def load_preferences(path: Path | None = None) -> OperatorPreferences | None:
     """Read allowlisted prefs. Returns None if missing. Never creates files."""
     cfg = Path(path) if path is not None else default_preferences_path()
+    if cfg.is_symlink():
+        raise PreferenceError("symlink_refused", "preferences path must not be a symlink")
     if not cfg.is_file():
         return None
     try:
@@ -126,6 +128,11 @@ def save_preferences(
 ) -> dict[str, str]:
     """Atomic write of allowlisted prefs. Refuses clobber unless overwrite=True."""
     cfg = Path(path) if path is not None else default_preferences_path()
+    # Refuse writing through a symlink (path or parent) — avoids unexpected targets.
+    if cfg.is_symlink() or (cfg.exists() and cfg.is_symlink()):
+        raise PreferenceError("symlink_refused", "preferences path must not be a symlink")
+    if cfg.parent.exists() and cfg.parent.is_symlink():
+        raise PreferenceError("symlink_refused", "preferences parent must not be a symlink")
     if cfg.exists() and not overwrite:
         raise PreferenceError(
             "exists_no_clobber",

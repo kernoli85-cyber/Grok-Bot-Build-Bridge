@@ -308,6 +308,7 @@ class JobStore:
         event_type: str | None = None,
         dedupe_key: str | None = None,
         extra_payload: dict[str, Any] | None = None,
+        expect_status: JobStatus | None = None,
     ) -> JobRecord:
         row = conn.execute(
             "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
@@ -333,13 +334,36 @@ class JobStore:
         owner = None if clear_lease else (lease_owner if lease_owner is not None else job.lease_owner)
         until = None if clear_lease else (lease_until if lease_until is not None else job.lease_until)
         err = error_code if error_code is not None else job.last_error_code
-        conn.execute(
-            """
-            UPDATE jobs SET status=?, attempt=?, updated_at=?, lease_owner=?,
-              lease_until=?, last_error_code=? WHERE task_id=?
-            """,
-            (new_status.value, attempt, now, owner, until, err, task_id),
-        )
+        if expect_status is not None:
+            cur = conn.execute(
+                """
+                UPDATE jobs SET status=?, attempt=?, updated_at=?, lease_owner=?,
+                  lease_until=?, last_error_code=? WHERE task_id=? AND status=?
+                """,
+                (
+                    new_status.value,
+                    attempt,
+                    now,
+                    owner,
+                    until,
+                    err,
+                    task_id,
+                    expect_status.value,
+                ),
+            )
+            if cur.rowcount != 1:
+                raise StoreError(
+                    "race_lost",
+                    f"expected status {expect_status.value} for {task_id}; concurrent update",
+                )
+        else:
+            conn.execute(
+                """
+                UPDATE jobs SET status=?, attempt=?, updated_at=?, lease_owner=?,
+                  lease_until=?, last_error_code=? WHERE task_id=?
+                """,
+                (new_status.value, attempt, now, owner, until, err, task_id),
+            )
         if event_type:
             payload = {"status": new_status.value, "attempt": attempt}
             if err:
@@ -434,6 +458,7 @@ class JobStore:
                     event_type="job.claimed",
                     dedupe_key=f"claimed:{owner}:{int(now)}",
                     extra_payload={"lease_owner": owner},
+                    expect_status=JobStatus.QUEUED,
                 )
         if post_error is not None:
             raise post_error
