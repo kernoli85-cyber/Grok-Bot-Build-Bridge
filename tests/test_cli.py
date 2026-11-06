@@ -7,7 +7,7 @@ from grok_bot_build_bridge.cli import main
 
 def test_cli_version(capsys):
     assert main(["version"]) == 0
-    assert capsys.readouterr().out.strip() == "0.3.0"
+    assert capsys.readouterr().out.strip() == "0.4.0"
 
 
 def test_cli_discover_demo(capsys):
@@ -44,3 +44,19 @@ def test_cli_jobs_demo(tmp_path, capsys):
     assert main(["jobs-status", "--state-db", str(db)]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["jobs"][0]["task_id"] == "cli-t1"
+
+
+def test_cli_outbox_pump_dry_run(tmp_path, capsys):
+    from grok_bot_build_bridge.transport.webhook import WebhookConfig, save_webhook_config
+    from grok_bot_build_bridge.state import JobStore
+    from grok_bot_build_bridge.state.clock import Clock, Jitter
+    db = tmp_path / "s.sqlite"
+    cfg = tmp_path / "webhook.json"
+    save_webhook_config(cfg, WebhookConfig(url="https://example.com/hook", bearer_token="tok"))
+    store = JobStore(db, clock=Clock(), jitter=Jitter(1))
+    store.clock.set(1000.0)
+    store.enqueue_job(task_id="t-pump-2")
+    assert main(["outbox-pump", "--state-db", str(db), "--config", str(cfg)]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["dry_run"] is True
+    assert data["results"]

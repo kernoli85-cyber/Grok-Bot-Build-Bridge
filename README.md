@@ -38,6 +38,14 @@ python -m grok_bot_build_bridge.cli plan-demo
 
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
+## Webhook transport (Slice 4)
+
+- HTTPS-only outbox pump (`outbox-pump`); **dry-run by default**
+- Explicit `--send` required for real POST; Bearer from private config path (not repo)
+- No redirects; default TLS; bounded timeouts/body; sanitized errors
+- `http_accepted` ≠ `bot_processed`
+- Windows: **no false chmod/ACL secrecy claims**
+
 ## Job state / outbox (Slice 3)
 
 - Own SQLite DB (`--state-db` or platform user data dir), mode 0600

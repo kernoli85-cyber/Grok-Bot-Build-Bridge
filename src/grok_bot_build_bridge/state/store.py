@@ -568,6 +568,33 @@ class JobStore:
             ).fetchone()
             return self._row_event(row2)
 
+    def mark_outbox_dead_letter(self, event_id: str, *, error: str) -> OutboxEvent:
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM outbox WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            if not row:
+                raise StoreError("event_not_found", f"unknown event_id {event_id!r}")
+            ev = self._row_event(row)
+            if ev.delivery == DeliveryState.BOT_PROCESSED:
+                raise StoreError("already_processed", "cannot dead-letter processed event")
+            conn.execute(
+                """
+                UPDATE outbox SET delivery=?, attempt=?, last_error=?
+                WHERE event_id=?
+                """,
+                (
+                    DeliveryState.DEAD_LETTERED.value,
+                    max(ev.attempt + 1, ev.max_attempts),
+                    (error or "dead_letter")[:200],
+                    event_id,
+                ),
+            )
+            row2 = conn.execute(
+                "SELECT * FROM outbox WHERE event_id = ?", (event_id,)
+            ).fetchone()
+            return self._row_event(row2)
+
     def fail_delivery(self, event_id: str, *, error: str) -> OutboxEvent:
         with self._tx() as conn:
             row = conn.execute(

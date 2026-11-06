@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import json
 import sys
 from typing import Sequence
@@ -12,6 +13,8 @@ from .models import DiscoveryReport
 from .adapter import discover_host
 from .state import DeliveryState, JobStatus, JobStore
 from .state.store import StoreError
+from .transport.pump import pump_outbox
+from .transport.webhook import WebhookConfig, WebhookTransport, load_webhook_config
 
 
 def _report_to_dict(report: DiscoveryReport) -> dict:
@@ -252,6 +255,49 @@ def cmd_outbox_tick(args: argparse.Namespace) -> int:
 
 
 
+def cmd_outbox_pump(args: argparse.Namespace) -> int:
+    """Dry-run (default) or explicit --send webhook pump — no daemon."""
+    store = _store_from_args(args)
+    transport = None
+    if args.config:
+        transport = WebhookTransport(load_webhook_config(Path(args.config)))
+    elif args.url and args.token:
+        transport = WebhookTransport(
+            WebhookConfig(url=args.url, bearer_token=args.token)
+        )
+    dry_run = not args.send
+    if args.send and transport is None:
+        print(json.dumps({"error": "config_or_url_token_required_for_send"}), flush=True)
+        return 2
+    try:
+        results = pump_outbox(
+            store,
+            transport,
+            dry_run=dry_run,
+            limit=args.limit,
+        )
+    except ValueError as exc:
+        print(json.dumps({"error": str(exc)}), flush=True)
+        return 2
+    json.dump(
+        {
+            "dry_run": dry_run,
+            "state_db": str(store.db_path),
+            "results": results,
+            "note": (
+                "dry_run_no_network"
+                if dry_run
+                else "send_mode_http_accepted_is_not_bot_processed"
+            ),
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="grok-bot-build-bridge",
@@ -301,6 +347,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_tick.add_argument("--bot-process", action="store_true")
     p_tick.add_argument("--limit", type=int, default=50)
     p_tick.set_defaults(func=cmd_outbox_tick)
+
+    p_pump = sub.add_parser(
+        "outbox-pump",
+        help="Dry-run (default) or --send webhook pump for due outbox events",
+    )
+    p_pump.add_argument("--state-db", required=True)
+    p_pump.add_argument("--config", help="Path to webhook.json (outside repo)")
+    p_pump.add_argument("--url", help="HTTPS webhook URL (send mode; prefer --config)")
+    p_pump.add_argument("--token", help="Bearer token (send mode; prefer --config)")
+    p_pump.add_argument("--send", action="store_true", help="Actually POST (default is dry-run)")
+    p_pump.add_argument("--limit", type=int, default=20)
+    p_pump.set_defaults(func=cmd_outbox_pump)
     return p
 
 
