@@ -39,6 +39,14 @@ python -m grok_bot_build_bridge.cli plan-demo
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
 
+
+## Windows Job Object demo (Slice 7)
+
+- Demo-only containment for `bridge-dummy-tree` via Job Objects (CREATE_SUSPENDED → assign → resume)
+- `TerminateJobObject` / kill-on-close tested on Windows CI; **not** wired to `jobs-cancel` (still state-only)
+- Host Job Object ≠ WSL guest cleanup; no `wsl --terminate` / `--shutdown` for per-job cancel
+- POSIX process-group demo remains separate and accurate
+
 ## Lease heartbeat / cancel honesty (Slice 6)
 
 - `renew_lease` while CLAIMED/RUNNING; **never** resurrects cancelled / terminal / needs_review
