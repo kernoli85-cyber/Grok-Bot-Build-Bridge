@@ -16,6 +16,7 @@ from .state.store import StoreError
 from .transport.pump import pump_outbox
 from .transport.webhook import WebhookConfig, WebhookTransport, load_webhook_config
 from .runner import build_approved_plan, execute_one_shot
+from .process_control import capability_matrix
 from .runner.plan import PlanError
 
 
@@ -329,6 +330,7 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
             owner=args.owner,
             dry_run=not args.execute,
             lease_sec=args.lease_sec,
+            heartbeat_interval_sec=args.heartbeat_sec,
         )
     except StoreError as exc:
         json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
@@ -346,8 +348,16 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
             "stderr_truncated": outcome.stderr_truncated,
             "note": outcome.note,
             "argv_preview": list(outcome.argv_preview),
+            "heartbeats": outcome.heartbeats,
+            "lease_lost": outcome.lease_lost,
             "state_db": str(store.db_path),
             "cancel_note": "cancellation is state-only; process tree kill not claimed",
+            "cancel_capability": {
+                "platform": capability_matrix().platform,
+                "production_cancel": capability_matrix().production_cancel,
+                "process_tree_kill": capability_matrix().process_tree_kill,
+                "wsl_guest_tree": capability_matrix().wsl_guest_tree,
+            },
         },
         sys.stdout,
         indent=2,
@@ -377,6 +387,34 @@ def cmd_jobs_retry(args: argparse.Namespace) -> int:
     sys.stdout.write("\n")
     return 0
 
+
+
+def cmd_jobs_cancel(args: argparse.Namespace) -> int:
+    store = _store_from_args(args)
+    try:
+        job = store.cancel(args.task_id)
+    except StoreError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    caps = capability_matrix()
+    json.dump(
+        {
+            "task_id": job.task_id,
+            "status": job.status.value,
+            "note": "state_only_no_process_kill",
+            "cancel_capability": {
+                "platform": caps.platform,
+                "production_cancel": caps.production_cancel,
+                "process_tree_kill": caps.process_tree_kill,
+                "wsl_guest_tree": caps.wsl_guest_tree,
+            },
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -453,6 +491,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--owner", default="local-worker")
     p_run.add_argument("--timeout", type=float, default=30.0)
     p_run.add_argument("--lease-sec", type=float, default=300.0)
+    p_run.add_argument(
+        "--heartbeat-sec",
+        type=float,
+        default=None,
+        help="Lease renew interval while running (default: lease_sec/3 capped)",
+    )
     p_run.add_argument("--max-turns", type=int, default=None)
     p_run.add_argument("--permission-mode", default=None)
     p_run.add_argument("--prompt", default="")
@@ -466,6 +510,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_retry.add_argument("--state-db", required=True)
     p_retry.add_argument("--task-id", required=True)
     p_retry.set_defaults(func=cmd_jobs_retry)
+
+    p_cancel = sub.add_parser(
+        "jobs-cancel",
+        help="Mark job cancelled (STATE-ONLY; does not kill processes)",
+    )
+    p_cancel.add_argument("--state-db", required=True)
+    p_cancel.add_argument("--task-id", required=True)
+    p_cancel.set_defaults(func=cmd_jobs_cancel)
     return p
 
 

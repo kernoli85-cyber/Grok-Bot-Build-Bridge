@@ -175,3 +175,25 @@ def test_native_ps1_invocation_shape():
     assert "-File" in argv
     assert str(ps1) in argv
     assert "--always-approve" not in argv
+
+
+def test_reject_shell_metachar_executable():
+    with pytest.raises(PlanError) as ei:
+        build_approved_plan(
+            task_id="t",
+            backend="wsl",
+            cwd="/tmp",
+            executable="/tmp/bridge-dummy;rm -rf /",
+        )
+    assert ei.value.code in {"executable_invalid", "executable_not_found", "executable_not_allowed"}
+
+
+def test_reject_arbitrary_basename():
+    with pytest.raises(PlanError) as ei:
+        build_approved_plan(
+            task_id="t",
+            backend="wsl",
+            cwd="/tmp",
+            executable="/bin/bash",
+        )
+    assert ei.value.code == "executable_not_allowed"

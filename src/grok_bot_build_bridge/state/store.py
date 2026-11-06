@@ -2,7 +2,7 @@
 
 Own app DB only. Does not store prompts/transcripts/secrets by default.
 HTTP accepted ≠ bot processed (no false exactly-once).
-Cancellation marks state only — does not kill a process (no runner yet).
+Cancellation marks state only — does not kill a process tree (see process_control).
 """
 from __future__ import annotations
 
@@ -439,6 +439,128 @@ class JobStore:
             raise post_error
         raise StoreError("claim_failed", "unreachable claim state")
 
+    def renew_lease(
+        self, task_id: str, *, owner: str, lease_sec: float = 30.0
+    ) -> JobRecord:
+        """Extend a live owner's lease. Never resurrects terminal/cancelled/needs_review.
+
+        If the lease already expired while RUNNING, mark needs_review (no auto-requeue)
+        and raise lease_lost. Does not re-queue CLAIMED on this path.
+        """
+        if not owner or not owner.strip():
+            raise StoreError("owner_empty", "lease owner required")
+        if lease_sec <= 0 or lease_sec > 86400:
+            raise StoreError("lease_invalid", "lease_sec out of bounds")
+        now = self.clock.time()
+        post_error: StoreError | None = None
+        with self._tx() as conn:
+            row = conn.execute(
+                "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            if not row:
+                raise StoreError("job_not_found", f"unknown task_id {task_id!r}")
+            job = self._row_job(row)
+            if job.status in TERMINAL_JOB:
+                raise StoreError(
+                    "terminal_job",
+                    f"cannot renew lease for terminal status {job.status.value}",
+                )
+            if job.status == JobStatus.NEEDS_REVIEW:
+                raise StoreError(
+                    "needs_review",
+                    "cannot renew lease for needs_review; use explicit_retry",
+                )
+            if job.status not in {JobStatus.CLAIMED, JobStatus.RUNNING}:
+                raise StoreError(
+                    "not_renewable",
+                    f"status {job.status.value} cannot renew lease",
+                )
+            if job.lease_owner != owner:
+                raise StoreError("lease_mismatch", "heartbeat owner mismatch")
+            if job.lease_until is not None and job.lease_until <= now:
+                if job.status == JobStatus.RUNNING:
+                    self._transition(
+                        conn,
+                        task_id,
+                        JobStatus.NEEDS_REVIEW,
+                        clear_lease=True,
+                        error_code="lease_expired_while_running",
+                        event_type="job.needs_review",
+                        dedupe_key=f"needs_review:lease_hb:{int(now)}",
+                        extra_payload={
+                            "reason": "lease_expired_while_running",
+                            "auto_requeue": False,
+                            "via": "renew_lease",
+                        },
+                    )
+                    post_error = StoreError(
+                        "lease_lost",
+                        "lease expired while running; marked needs_review (no auto-requeue)",
+                    )
+                else:
+                    raise StoreError(
+                        "lease_expired",
+                        "lease expired before running; reclaim via claim_job only",
+                    )
+            else:
+                until = now + lease_sec
+                conn.execute(
+                    "UPDATE jobs SET lease_until=?, updated_at=? WHERE task_id=?",
+                    (until, now, task_id),
+                )
+                row2 = conn.execute(
+                    "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                return self._row_job(row2)
+        if post_error is not None:
+            raise post_error
+        raise StoreError("renew_failed", "unreachable renew state")
+
+    def _guard_live_owner(
+        self, conn, job: JobRecord, owner: str | None, *, op: str
+    ) -> tuple[JobRecord, StoreError | None]:
+        """Refuse commits from stale/lost owners.
+
+        If lease expired while RUNNING, transition to needs_review inside the
+        caller's transaction and return a post-commit StoreError (so the flip
+        is not rolled back by raising inside the tx).
+        """
+        now = self.clock.time()
+        if job.status in TERMINAL_JOB:
+            raise StoreError(
+                "terminal_job",
+                f"cannot {op} from terminal status {job.status.value}",
+            )
+        if job.status == JobStatus.NEEDS_REVIEW:
+            raise StoreError(
+                "needs_review",
+                f"cannot {op} job already needs_review",
+            )
+        if owner is not None:
+            if not job.lease_owner or job.lease_owner != owner:
+                raise StoreError("lease_mismatch", f"stale worker cannot {op}")
+            if job.lease_until is not None and job.lease_until <= now:
+                if job.status == JobStatus.RUNNING:
+                    self._transition(
+                        conn,
+                        job.task_id,
+                        JobStatus.NEEDS_REVIEW,
+                        clear_lease=True,
+                        error_code="lease_expired_on_commit",
+                        event_type="job.needs_review",
+                        dedupe_key=f"needs_review:commit:{op}:{int(now)}",
+                        extra_payload={
+                            "reason": "lease_expired_on_commit",
+                            "auto_requeue": False,
+                            "op": op,
+                        },
+                    )
+                return job, StoreError(
+                    "lease_lost",
+                    f"lease expired; cannot {op} (no auto-requeue)",
+                )
+        return job, None
+
     def mark_running(self, task_id: str, *, owner: str) -> JobRecord:
         with self._tx() as conn:
             row = conn.execute(
@@ -458,23 +580,30 @@ class JobStore:
             )
 
     def mark_succeeded(self, task_id: str, *, owner: str | None = None) -> JobRecord:
+        post_error: StoreError | None = None
+        result: JobRecord | None = None
         with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
             ).fetchone()
             if not row:
                 raise StoreError("job_not_found", f"unknown task_id {task_id!r}")
-            job = self._row_job(row)
-            if owner is not None and job.lease_owner and job.lease_owner != owner:
-                raise StoreError("lease_mismatch", "stale worker cannot commit success")
-            return self._transition(
-                conn,
-                task_id,
-                JobStatus.SUCCEEDED,
-                clear_lease=True,
-                event_type="job.succeeded",
-                dedupe_key="succeeded",
+            job, post_error = self._guard_live_owner(
+                conn, self._row_job(row), owner, op="succeed"
             )
+            if post_error is None:
+                result = self._transition(
+                    conn,
+                    task_id,
+                    JobStatus.SUCCEEDED,
+                    clear_lease=True,
+                    event_type="job.succeeded",
+                    dedupe_key="succeeded",
+                )
+        if post_error is not None:
+            raise post_error
+        assert result is not None
+        return result
 
     def mark_needs_review(
         self, task_id: str, *, error_code: str, owner: str | None = None
@@ -487,8 +616,18 @@ class JobStore:
             if not row:
                 raise StoreError("job_not_found", f"unknown task_id {task_id!r}")
             job = self._row_job(row)
+            # Idempotent if already needs_review with same owner context
+            if job.status == JobStatus.NEEDS_REVIEW:
+                return job
+            if job.status in TERMINAL_JOB:
+                raise StoreError(
+                    "terminal_job",
+                    f"cannot needs_review from terminal {job.status.value}",
+                )
             if owner is not None and job.lease_owner and job.lease_owner != owner:
                 raise StoreError("lease_mismatch", "stale worker cannot commit needs_review")
+            # Lease-expired owner may still mark needs_review for uncertainty (owned path)
+            # but not if lease already cleared by another actor.
             return self._transition(
                 conn,
                 task_id,
@@ -536,17 +675,21 @@ class JobStore:
     def mark_failed(
         self, task_id: str, *, error_code: str, retry: bool = False, owner: str | None = None
     ) -> JobRecord:
+        post_error: StoreError | None = None
+        result: JobRecord | None = None
         with self._tx() as conn:
             row = conn.execute(
                 "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
             ).fetchone()
             if not row:
                 raise StoreError("job_not_found", f"unknown task_id {task_id!r}")
-            job = self._row_job(row)
-            if owner is not None and job.lease_owner and job.lease_owner != owner:
-                raise StoreError("lease_mismatch", "stale worker cannot commit failure")
+            job, post_error = self._guard_live_owner(
+                conn, self._row_job(row), owner, op="fail"
+            )
+            if post_error is not None:
+                pass
             # From running/claimed → failed first
-            if job.status in {JobStatus.RUNNING, JobStatus.CLAIMED}:
+            elif job.status in {JobStatus.RUNNING, JobStatus.CLAIMED}:
                 job = self._transition(
                     conn,
                     task_id,
@@ -564,8 +707,10 @@ class JobStore:
                 )
             # Optional immediate requeue only when caller opts in (definitive pre-exec failures).
             # Uncertain execution paths must use mark_needs_review instead.
-            if retry and job.attempt < job.max_attempts:
-                return self._transition(
+            if post_error is not None:
+                result = None
+            elif retry and job.attempt < job.max_attempts:
+                result = self._transition(
                     conn,
                     task_id,
                     JobStatus.QUEUED,
@@ -574,8 +719,8 @@ class JobStore:
                     dedupe_key=f"requeued:{job.attempt}",
                     extra_payload={"explicit_or_opt_in_retry": True},
                 )
-            if retry and job.attempt >= job.max_attempts:
-                return self._transition(
+            elif retry and job.attempt >= job.max_attempts:
+                result = self._transition(
                     conn,
                     task_id,
                     JobStatus.DEAD_LETTERED,
@@ -584,10 +729,15 @@ class JobStore:
                     event_type="job.dead_lettered",
                     dedupe_key="dead_lettered",
                 )
-            return job
+            else:
+                result = job
+        if post_error is not None:
+            raise post_error
+        assert result is not None
+        return result
 
     def cancel(self, task_id: str) -> JobRecord:
-        """Mark cancelled. Does NOT kill any process (no runner in this slice)."""
+        """Mark cancelled. STATE-ONLY — does NOT kill any process or process tree."""
         with self._tx() as conn:
             return self._transition(
                 conn,

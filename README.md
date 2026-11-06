@@ -38,6 +38,17 @@ python -m grok_bot_build_bridge.cli plan-demo
 
 Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 
+
+## Lease heartbeat / cancel honesty (Slice 6)
+
+- `renew_lease` while CLAIMED/RUNNING; **never** resurrects cancelled / terminal / needs_review
+- Stale or lease-expired workers **cannot** commit success/failure (→ `needs_review`, no auto-requeue)
+- Runner heartbeats during `--execute`; lease loss mid-run → `needs_review`
+- `jobs-cancel` is **state-only**; process-tree kill is **not** claimed
+- Windows tree kill needs Job Objects (not wired); WSL: killing `wsl.exe` ≠ guest cleanup; `wsl --terminate/--shutdown` are distro/VM-wide (too broad)
+- POSIX demo only: process-group stop for intentionally contained `bridge-dummy-tree` fixtures
+- Argv preview redacts `--single` prompts; no transcript storage by default
+
 ## One-shot runner (Slice 5)
 
 - `runner-run` dry-run by default; `--execute` required to spawn
@@ -67,5 +78,5 @@ Never commit webhook keys, SSH keys, or `webhook.json`. See `.gitignore`.
 ## Non-goals (this PR)
 
 - Live Windows/WSL probing subprocesses
-- Job execution / marketplace plugin packaging
+- Marketplace plugin packaging / unattended daemon
 - Shared secrets or credential reads

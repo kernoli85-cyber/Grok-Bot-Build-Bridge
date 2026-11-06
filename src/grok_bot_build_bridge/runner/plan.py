@@ -28,6 +28,24 @@ class PlanError(Exception):
         self.message = message
 
 
+def redact_argv_preview(argv: Sequence[str]) -> tuple[str, ...]:
+    """Public/log-safe argv preview — never echo --single prompt payloads."""
+    out: list[str] = []
+    hide_next = False
+    for tok in argv:
+        if hide_next:
+            out.append("<redacted_prompt>")
+            hide_next = False
+            continue
+        if tok == "--single":
+            out.append(tok)
+            hide_next = True
+            continue
+        out.append(str(tok))
+    return tuple(out)
+
+
+
 @dataclass(frozen=True)
 class ApprovedExecutionPlan:
     """Operator-approved, immutable run contract.
