@@ -120,3 +120,22 @@ to the real repo will be a separate owner-run step with path re-validation. No a
 3. **Windows-source support** needs a reviewed handle-based implementation (§4.2).
 4. Distribution of the per-user app (packaging/signing) is unsolved, but it does not block the
    POSIX reader/receiver work, which can be built and tested on the box with fixture trees.
+
+## Status v0.22.0: POSIX reader + receiver library (no CLI)
+
+`grok_bot_build_bridge.snapshot_posix` implements both ends as a library only; no
+user-facing command, no MCP exposure, no model call. Windows/non-POSIX fails closed
+(`require_platform`). Production refuses euid 0; only tests inject a uid.
+
+Reader: dirfd chain with `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, files `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`,
+regular + `nlink==1` + same device + size limits + exact post-read fstat/lstat identity.
+Symlinks (files and dirs), symlinked parents, FIFOs/devices, hard links, mount boundaries,
+secrets and excluded dirs are skipped with counted reasons; instruction files excluded by default.
+
+Receiver: fresh `gbbb-repo-*` 0700 dir under a verified trusted staging parent, fd-relative
+`O_EXCL` 0600 creates, `INCOMPLETE` marker until the whole stream verifies, then `COMPLETE`.
+On failure it removes only its own dir without following symlinks; a SIGKILL leftover stays
+private and `INCOMPLETE`. TTL cleanup is design only.
+
+Honest limits: in-place same-size modification with restored timestamps, and inode reuse after
+unlink+recreate, cannot be fully detected; a hostile same-user process is out of scope.
