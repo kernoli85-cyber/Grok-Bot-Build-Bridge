@@ -27,7 +27,7 @@ _CONTEXT = _COMMON | {"source", "files", "question"}
 _PROPOSE = (_COMMON - {"show_answer"}) | {
     "source", "files", "instruction", "show_proposal", "show_rejected_reply", "replacement_format",
 }
-_FORMATS = ("json-v1", "literal-v1")
+_FORMATS = ("json-v1", "literal-v1", "native-schema-v1")
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
 _EXE_BAD = set(";&|$`<>(){}[]!*?~#\\\"'\n\r\t ")
 
@@ -158,7 +158,7 @@ def _checked(obj: dict) -> dict:
     if obj.get("op") == "propose" and "replacement_format" in obj:
         replacement_format = obj["replacement_format"]
         if replacement_format not in _FORMATS:
-            raise InvokeError("field_invalid", "replacement_format must be json-v1 or literal-v1")
+            raise InvokeError("field_invalid", "replacement_format must be json-v1, literal-v1, or native-schema-v1")
     if show_rejected and not show_proposal:
         raise InvokeError("field_invalid", "show_rejected_reply requires show_proposal")
     if "confirm_send" in obj and not isinstance(obj["confirm_send"], str):
@@ -185,7 +185,8 @@ def _shape(argv, prompt: str, placeholder: str) -> list[str]:
 
 
 def _binding(op: str, executable: str, choice, timeout: float, selection: list[str], argv, placeholder, prompt: str,
-             *, show_rejected_reply: bool = False, replacement_format: str = "json-v1") -> dict:
+             *, show_rejected_reply: bool = False, replacement_format: str = "json-v1",
+             native: tuple[str, str] | None = None) -> dict:
     binding = {
         "op": op, "backend": "posix-local", "executable": executable,
         "executable_realpath": os.path.realpath(executable),
@@ -198,6 +199,9 @@ def _binding(op: str, executable: str, choice, timeout: float, selection: list[s
     if op == "propose":
         binding["show_rejected_reply"] = bool(show_rejected_reply)
         binding["replacement_format"] = replacement_format
+        if native is not None:
+            binding["native_system_sha256"] = hashlib.sha256(native[0].encode()).hexdigest()
+            binding["native_schema_sha256"] = hashlib.sha256(native[1].encode()).hexdigest()
     return binding
 
 
@@ -230,6 +234,7 @@ def _prepare(obj: dict, checked: dict) -> dict:
     summary = None
     skipped = None
     bases: list[tuple[str, str]] = []
+    native: tuple[str, str] | None = None
     if obj["op"] == "ask":
         try:
             prompt = validate_ask_prompt(obj["prompt"])
@@ -255,6 +260,9 @@ def _prepare(obj: dict, checked: dict) -> dict:
         selection = list(files)
         bases = texts
         summary = packed.summary()
+        if checked["replacement_format"] == "native-schema-v1":
+            from .proposal import NATIVE_SYSTEM_PROMPT, native_replacement_schema
+            native = (NATIVE_SYSTEM_PROMPT, native_replacement_schema(selection))
     else:
         source, files, question = obj["source"], obj["files"], obj["question"]
         if not isinstance(source, str) or not isinstance(question, str) or not isinstance(files, list):
@@ -276,12 +284,13 @@ def _prepare(obj: dict, checked: dict) -> dict:
     try:
         plan = PL.build_local_plan(
             grok_path=executable, cwd=LOCAL_PLACEHOLDER_CWD, prompt=prompt,
-            model=choice, max_turns=1, timeout_sec=timeout)
+            model=choice, max_turns=1, timeout_sec=timeout, native_structured=native)
     except PL.RunnerError as exc:
         raise InvokeError(exc.code, exc.message) from None
     binding = _binding(obj["op"], executable, choice, timeout, selection, plan.argv, LOCAL_PLACEHOLDER_CWD, prompt,
                        show_rejected_reply=bool(checked.get("show_rejected")),
-                       replacement_format=str(checked.get("replacement_format") or "json-v1"))
+                       replacement_format=str(checked.get("replacement_format") or "json-v1"),
+                       native=native)
     return {
         "prompt": prompt, "selection": selection, "choice": choice, "timeout": timeout,
         "executable": executable, "token": _token(key, prompt, binding), "key_created": key_created,
@@ -289,6 +298,7 @@ def _prepare(obj: dict, checked: dict) -> dict:
         "source": obj.get("source"), "files": list(obj.get("files") or []),
         "instruction": obj.get("instruction"),
         "replacement_format": checked.get("replacement_format") or "json-v1",
+        "native": native,
     }
 
 
@@ -341,16 +351,21 @@ def run_invoke(raw: bytes) -> int:
     try:
         real = PL.build_local_plan(
             grok_path=info["executable"], cwd=cwd, prompt=info["prompt"],
-            model=info["choice"], max_turns=1, timeout_sec=info["timeout"])
+            model=info["choice"], max_turns=1, timeout_sec=info["timeout"],
+            native_structured=info.get("native"))
     except PL.RunnerError as exc:
         PL._cleanup_cwd(cwd)
         return _err(exc.code, exc.message)
     if _shape(real.argv, info["prompt"], cwd) != _shape(info["plan"].argv, info["prompt"], LOCAL_PLACEHOLDER_CWD):
         PL._cleanup_cwd(cwd)
         return _err("consent_mismatch", "launch argv differs from the confirmed plan")
-    res = PL.run_local(real, show_answer=checked["show"], capture_text=(obj["op"] == "propose"))
+    res = PL.run_local(
+        real, show_answer=checked["show"], capture_text=(obj["op"] == "propose"),
+        structured_channel=(obj["op"] == "propose" and info.get("replacement_format") == "native-schema-v1"))
     captured = res.pop("captured_text", None)
     captured_meta = res.pop("captured_meta", None) or {}
+    structured_state = res.pop("structured_state", None)
+    structured_value = res.pop("structured_value", None)
     body = {
         "schema": SCHEMA, "mode": "execute", "op": obj["op"], "model_call": True,
         "stored": False, "db": False, "outbox": False, "mcp": False, "retry": False,
@@ -368,19 +383,39 @@ def run_invoke(raw: bytes) -> int:
         ProposalError, model_text_diagnostic, parse_proposal, proposal_nonce, review, stage_proposal,
     )
     from .snapshot_posix import SnapshotError
-    diagnostic = model_text_diagnostic(
-        captured, extraction_key=str(captured_meta.get("key") or "none"),
-        alternate_present=bool(captured_meta.get("alternate_present")),
-        alternate_bytes=captured_meta.get("alternate_bytes"),
-        fields_equal=bool(captured_meta.get("fields_equal")),
-        stdout_truncated=bool(res.get("stdout_truncated")))
+    native_mode = info.get("replacement_format") == "native-schema-v1"
+    if native_mode:
+        diagnostic = {
+            "parsed_channel": "structuredOutput",
+            "structured_state": structured_state or "absent",
+            "text_channel_ignored": True,
+            "stdout_capture_truncated": bool(res.get("stdout_truncated")),
+        }
+    else:
+        diagnostic = model_text_diagnostic(
+            captured, extraction_key=str(captured_meta.get("key") or "none"),
+            alternate_present=bool(captured_meta.get("alternate_present")),
+            alternate_bytes=captured_meta.get("alternate_bytes"),
+            fields_equal=bool(captured_meta.get("fields_equal")),
+            stdout_truncated=bool(res.get("stdout_truncated")))
     try:
         _packed, now, _skipped = stage_proposal(
             info["source"], info["files"], info["instruction"], info["key"], info["replacement_format"])
         if list(now) != list(info["bases"]):
             raise ProposalError("source_changed", "selected files changed during the call")
         nonce = proposal_nonce(info["key"], list(info["bases"]), str(info["instruction"] or "").strip())
-        proposed = parse_proposal(captured or "", info["selection"], fmt=info["replacement_format"], nonce=nonce)
+        if native_mode:
+            from .proposal import validate_replacement_object
+            if structured_state != "value":
+                code = {
+                    "error": "structured_output_rejected",
+                    "ambiguous": "structured_output_ambiguous",
+                    "invalid": "structured_output_invalid",
+                }.get(structured_state or "", "structured_output_absent")
+                raise ProposalError(code, "native structured output was not one object")
+            proposed = validate_replacement_object(structured_value, info["selection"])
+        else:
+            proposed = parse_proposal(captured or "", info["selection"], fmt=info["replacement_format"], nonce=nonce)
         body["proposal"] = review(
             info["selection"], dict(info["bases"]), proposed, info["key"],
             show=checked["show_proposal"], fmt=info["replacement_format"])
@@ -391,9 +426,15 @@ def run_invoke(raw: bytes) -> int:
                     "diagnostic": diagnostic}
         if checked["show_rejected"] and checked["show_proposal"]:
             from .runner.grok_result import sanitize_display_text
-            shown, cut = sanitize_display_text(captured or "")
-            proposal["rejected_reply"] = shown
-            proposal["rejected_reply_cut"] = cut
+            if native_mode and structured_state == "value" and isinstance(structured_value, dict):
+                shown, cut = sanitize_display_text(json.dumps(structured_value, sort_keys=True))
+            elif native_mode:
+                shown, cut = "", False
+            else:
+                shown, cut = sanitize_display_text(captured or "")
+            if shown:
+                proposal["rejected_reply"] = shown
+                proposal["rejected_reply_cut"] = cut
         body["proposal"] = proposal
         return _out(body, 3)
     body["status"] = "proposal_accepted"

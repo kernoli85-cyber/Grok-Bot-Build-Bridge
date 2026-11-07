@@ -522,6 +522,7 @@ def build_wsl_grok_ask_plan(
     max_turns: int = 1,
     timeout_sec: float = 180.0,
     model: "ModelChoice | None" = None,
+    native_structured: tuple[str, str] | None = None,
 ) -> ApprovedExecutionPlan:
     """Text-only single prompt via wsl.exe with the smoke's isolation flags/deny rules.
 
@@ -559,8 +560,17 @@ def build_wsl_grok_ask_plan(
             "--exec", ASK_GUEST_TIMEOUT, "-k", str(ASK_GUEST_KILL_GRACE), guest,
             "/usr/bin/env", *GROK_SMOKE_ENV, *ASK_EXTRA_ENV, smoke.executable)
     tail = ("--cwd", c, *model_flags, *flags, *deny)
-    _reject_forbidden(head + tail)  # prompt is a value, not a flag; checked separately
-    argv = (*head, "--single", p, *tail)
+    native_argv: tuple[str, ...] = ()
+    if native_structured is not None:
+        system, schema = native_structured
+        for label, value in (("system", system), ("schema", schema)):
+            if not isinstance(value, str) or not value or any(ord(ch) < 32 for ch in value):
+                raise PlanError("native_structured_invalid", f"{label} text is empty or has control characters")
+            if any(ch in value for ch in ("|", ";", "&", ">", "<", "`")):
+                raise PlanError("native_structured_invalid", f"{label} text has shell metacharacters")
+        native_argv = ("--verbatim", "--system-prompt-override", system, "--json-schema", schema)
+    _reject_forbidden(head + tail + native_argv)  # prompt and schema values are checked separately
+    argv = (*head, *native_argv, "--single", p, *tail)
     return ApprovedExecutionPlan(
         task_id=smoke.task_id, backend="wsl", cwd=c, executable=smoke.executable, argv=argv,
         timeout_sec=t + ASK_GUEST_KILL_GRACE + ASK_HOST_DEADLINE_MARGIN, max_turns=max_turns, permission_mode="dontAsk",

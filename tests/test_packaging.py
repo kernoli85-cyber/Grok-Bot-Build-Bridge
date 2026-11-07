@@ -351,6 +351,9 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
                 "instruction": "No-op."}
         r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
         assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        native = dict(prop, replacement_format="native-schema-v1")
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(native))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
     else:
         d = json.loads(r.stdout)
         assert r.returncode == 0 and d["mode"] == "dry_run" and d["model_call"] is False
@@ -425,6 +428,43 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         body = json.loads(r.stdout)
         assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
         assert body["proposal"]["format"] == "literal-v1" and lit.read_bytes() == lit_before
+        nat = psrc / "notes" / "n.txt"
+        nat.write_text('QUOTES = \'""""\'\n')
+        nat_before = nat.read_bytes()
+        nat_dummy = tmp_path / "nat-bin" / "grok"
+        nat_dummy.parent.mkdir(mode=0o755)
+        nat_script = "\n".join([
+            "#!" + sys.executable,
+            "import json, os, sys",
+            "assert sys.argv.count('--single') == 1",
+            "assert '--verbatim' in sys.argv and '--json-schema' in sys.argv",
+            "assert '--system-prompt-override' in sys.argv",
+            "assert '--rules' not in sys.argv and '--prompt-file' not in sys.argv",
+            "assert '--sandbox' in sys.argv and sys.argv[sys.argv.index('--max-turns') + 1] == '1'",
+            "assert os.listdir('.') == []",
+            "schema = json.loads(sys.argv[sys.argv.index('--json-schema') + 1])",
+            "assert schema['additionalProperties'] is False",
+            "assert schema['properties']['files']['items']['properties']['path']['enum'] == ['notes/n.txt']",
+            "value = {'schema': 'gbbb.file_replacements/v1', 'files': [{'path': 'notes/n.txt', 'content': " + repr(nat.read_text()) + "}]}",
+            "print(json.dumps({'text': 'I edited the file and ran tests.', 'structuredOutput': value,",
+            " 'stopReason': 'end_turn', 'num_turns': 1,",
+            " 'usage': {'input_tokens': 1, 'output_tokens': 1},",
+            " 'modelUsage': {'provider-model-id': {}}}))",
+            "",
+        ])
+        nat_dummy.write_text(nat_script)
+        nat_dummy.chmod(0o755)
+        nat_env = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(nat_dummy),
+                   "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/n.txt"],
+                   "instruction": "Keep the text.", "replacement_format": "native-schema-v1"}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(nat_env))
+        tok = json.loads(r.stdout)["consent_token"]
+        nat_env.update(execute=True, allow_model_call=True, confirm_send=tok)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(nat_env))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
+        assert body["proposal"]["format"] == "native-schema-v1" and body["proposal"]["changed"] is False
+        assert nat.read_bytes() == nat_before and "I edited the file" not in r.stdout
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

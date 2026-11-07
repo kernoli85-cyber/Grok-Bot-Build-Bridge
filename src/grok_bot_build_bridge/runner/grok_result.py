@@ -107,6 +107,7 @@ def parse_grok_json_result(
     truncated: bool = False,
     expected_text: str | None = None,
     expected_models: tuple[str, ...] | None = None,
+    allow_structured_without_text: bool = False,
 ) -> GrokResultSummary:
     if truncated:
         return _fail("truncated")
@@ -146,7 +147,14 @@ def parse_grok_json_result(
         return _fail("not_object")
     text, ti = _first(obj, _TEXT_KEYS)
     if not isinstance(text, str):
-        return _fail("no_text")
+        # Native proposal mode only. An empty stand-in is not a proposal and is
+        # never read as one. Ask results still require text or result.
+        if allow_structured_without_text and (
+            "structuredOutput" in obj or "structuredOutputError" in obj
+        ):
+            text, ti = "", 0
+        else:
+            return _fail("no_text")
 
     stop, si = _first(obj, _STOP_KEYS)
     stop = stop if isinstance(stop, str) and _STOP_RE.match(stop) else None
@@ -302,6 +310,42 @@ def result_text_meta(stdout: str | bytes | None) -> dict[str, Any]:
         "alternate_bytes": len(other.encode()) if alt else None,
         "fields_equal": bool(alt and other == value),
     }
+
+
+def structured_output_status(stdout: str | bytes | None) -> dict[str, Any]:
+    """Headless ``--output-format json`` structured field only.
+
+    Current grok-build headless tests expose the value as ``structuredOutput``
+    and a failure as ``structuredOutputError``. This does not read ``text`` or
+    the snake_case streaming-messages field. Both keys together are ambiguous.
+    The error string is not returned.
+    """
+    absent = {"state": "absent", "value": None}
+    if not stdout:
+        return absent
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return absent
+    try:
+        obj = json.loads(stdout.strip())
+    except (ValueError, RecursionError):
+        return absent
+    if not isinstance(obj, dict):
+        return absent
+    has_value = "structuredOutput" in obj
+    has_error = "structuredOutputError" in obj
+    if has_value and has_error:
+        return {"state": "ambiguous", "value": None}
+    if has_error:
+        return {"state": "error", "value": None}
+    if not has_value:
+        return absent
+    value = obj.get("structuredOutput")
+    if not isinstance(value, dict):
+        return {"state": "invalid", "value": None}
+    return {"state": "value", "value": value}
 
 
 def result_text(stdout: str | bytes | None) -> str | None:
