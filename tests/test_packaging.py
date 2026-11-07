@@ -258,6 +258,16 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     ghost_db = tmp_path / "ghost" / "s.db"
     assert cli("jobs-status", "--state-db", str(ghost_db)).returncode == 2 and not ghost_db.parent.exists()
 
+    # model settings + model-bound ask dry-run from the installed wheel (no grok, no WSL call).
+    ms = tmp_path / "ms" / "model_settings.json"
+    r = cli("model-settings", "--settings", str(ms), "add-alias", "LM-Studio", "--expect-usage-key", "fake-local-model")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert cli("model-settings", "--settings", str(ms), "set-preferred", "LM-Studio").returncode == 0
+    r = cli("ask", "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok",
+            "--prompt", "hi", "--model-settings", str(ms))
+    d = json.loads(r.stdout)
+    assert r.returncode == 0 and d["dry_run"] is True and d["limits"]["model"]["source"] == "owner_preference"
+    assert d["argv_preview"][d["argv_preview"].index("--model") + 1] == "LM-Studio"
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

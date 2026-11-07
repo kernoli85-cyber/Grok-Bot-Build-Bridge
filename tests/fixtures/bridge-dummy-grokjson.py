@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Dummy emitting grok-style JSON (test only; no network, no grok)."""
 import json, os, sys
-MODES = ("ok", "noise", "mismatch", "badutf8", "answer", "error")
+MODES = ("ok", "noise", "mismatch", "badutf8", "answer", "error", "mu_local", "mu_grok", "mu_empty")
 mode = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in MODES else "ok"
 base = os.path.basename(__file__)
 for m in MODES[1:]:
@@ -24,3 +24,7 @@ elif mode == "answer":
 elif mode == "error":
     print(json.dumps({"text": "", "stopReason": "error", "is_error": True}))
     sys.exit(0)
+elif mode.startswith("mu_"):
+    mu = {"mu_local": {"fake-local-model": {"inputTokens": 3, "modelCalls": 1}},
+          "mu_grok": {"grok-4.6": {"inputTokens": 3, "modelCalls": 1}}, "mu_empty": {}}[mode]
+    print(json.dumps({"text": "fake answer", "stopReason": "end_turn", "num_turns": 1, "modelUsage": mu}))

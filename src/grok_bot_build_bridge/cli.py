@@ -255,6 +255,8 @@ _ERROR_TEXT = {
     "success_exit_invalid_result": "the process exited 0 but its output was not a valid Grok JSON result",
     "model_result_not_ok": "Grok returned a result that does not report a normal finish",
     "smoke_text_mismatch": "the smoke reply was not exactly BRIDGE_OK",
+    "model_identity_mismatch": "Grok reported a model other than the one that was selected",
+    "model_identity_unverified": "Grok did not report which model answered, so the selected model is not confirmed",
     "result_persist_failed": "the result could not be saved, so success is not claimed",
     "lease_lost_during_run": "the worker lost its lease while running",
 }
@@ -700,6 +702,49 @@ def _read_ask_prompt(args: argparse.Namespace) -> str:
     return validate_ask_prompt(data)
 
 
+def cmd_model_settings(args: argparse.Namespace) -> int:
+    """Edit only the bridge's own settings file. Never reads ~/.grok, never runs grok models."""
+    from dataclasses import replace as _r
+
+    from .model_select import (ModelAlias, ModelSelectionError, _alias_from, load_settings,
+                               save_settings, settings_to_dict, validate_model_id)
+    path = Path(args.settings) if args.settings else None
+    try:
+        s = load_settings(path)
+        if args.ms_cmd == "show":
+            out = settings_to_dict(s)
+            out["note"] = ("Names are owner-entered and NOT verified as available; the bridge never "
+                           "lists models (grok models needs auth/network). Local does not mean free or offline.")
+            json.dump(out, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return 0
+        if args.ms_cmd == "set-preferred":
+            s = _r(s, preferred=None if args.clear else validate_model_id(args.model_id))
+        elif args.ms_cmd == "add-alias":
+            d = {"kind": args.kind, "expect_usage_keys": args.expect_usage_key}
+            if args.timeout_sec is not None:
+                d["timeout_sec"] = args.timeout_sec
+            a: ModelAlias = _alias_from(args.name, d)
+            clash = [k for k in s.aliases if k.casefold() == a.name.casefold()]
+            if clash and not args.replace:
+                raise ModelSelectionError("alias_exists", "alias exists; pass --replace")
+            al = {k: v for k, v in s.aliases.items() if k not in clash}
+            al[a.name] = a
+            s = _r(s, aliases=al)
+        elif args.ms_cmd == "remove-alias":
+            if args.name not in s.aliases:
+                raise ModelSelectionError("alias_unknown", "no such alias")
+            s = _r(s, aliases={k: v for k, v in s.aliases.items() if k != args.name})
+        save_settings(s, path)
+    except ModelSelectionError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump({"saved": True, **settings_to_dict(s)}, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
+
+
 def cmd_ask(args: argparse.Namespace) -> int:
     """Text-only single prompt to Grok via wsl.exe. Dry-run default: no DB, no temp
     dir, no host call, prompt not stored. Real call: --execute AND --allow-model-call."""
@@ -714,13 +759,21 @@ def cmd_ask(args: argparse.Namespace) -> int:
         sys.stdout.write("\n")
         return 2
 
+    from .model_select import ModelSelectionError, load_settings, resolve_model
+
     task_id = args.task_id or f"ask-{uuid.uuid4().hex[:16]}"
+    try:
+        settings = load_settings(Path(args.model_settings) if args.model_settings else None)
+        choice = resolve_model(args.model, settings, use_preference=not args.no_model_preference)
+    except ModelSelectionError as exc:
+        return _err(exc.code, exc.message)
+    timeout = args.timeout if args.timeout is not None else (choice.default_timeout_sec or 180.0)
     try:
         prompt = _read_ask_prompt(args)
         plan = build_wsl_grok_ask_plan(
             task_id=task_id, distro=args.wsl_distro or "", user=args.wsl_user or "",
             grok_path=args.executable or "", cwd=args.cwd or ASK_DRYRUN_CWD,
-            prompt=prompt, max_turns=args.max_turns, timeout_sec=args.timeout,
+            prompt=prompt, max_turns=args.max_turns, timeout_sec=timeout, model=choice,
         )
     except PlanError as exc:
         return _err(exc.code, exc.message)
@@ -740,6 +793,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         "tools": "builtin tools denied + deny rules incl MCPTool + dontAsk + strict sandbox (docs semantics, unverified on 1.0.70)",
         "not_isolated": "user ~/.grok config and native MCP servers may still load; trust state of the fresh cwd unknown",
         "approval": "--allow-model-call is a technical gate only; it does not replace the owner's explicit permission",
+        "model": choice.describe(),
     }
     if not args.execute and args.format == "text":
         sys.stdout.write(
@@ -747,7 +801,12 @@ def cmd_ask(args: argparse.Namespace) -> int:
             f"The prompt has {info['prompt_bytes']} bytes and would run in a fresh /tmp/gbbb-ask-* "
             f"directory inside WSL distro {plan.wsl_distro} as {plan.wsl_user}, with at most "
             f"{plan.max_turns} turn(s) and a {plan.timeout_sec:g} s timeout. "
-            "A real call needs --execute --allow-model-call and the owner's permission. "
+            + (f"Model {choice.model_id} ({choice.source.replace('_', ' ')}) would be passed with --model; "
+               "the bridge has not checked that it exists, and the run only counts as done if Grok "
+               "reports that model was used. "
+               if choice.model_id else
+               "No model is chosen, so Grok Build uses its own default, which the bridge cannot see. ")
+            + "Choosing a local model does not make the call free or offline. A real call needs --execute --allow-model-call and the owner's permission. "
             "While it runs, the prompt is visible in the process list.\n")
         return 0
     if not args.execute:
@@ -781,7 +840,8 @@ def cmd_ask(args: argparse.Namespace) -> int:
     from dataclasses import replace as _r
     plan = build_wsl_grok_ask_plan(
         task_id=task_id, distro=plan.wsl_distro, user=plan.wsl_user, grok_path=plan.executable,
-        cwd=cwd, prompt=prompt, max_turns=plan.max_turns, timeout_sec=plan.timeout_sec)
+        cwd=cwd, prompt=prompt, max_turns=plan.max_turns, timeout_sec=plan.timeout_sec,
+        model=choice)
     plan = _r(plan, return_answer=bool(args.show_answer))
     store = _store_from_args(args)
     try:
@@ -790,6 +850,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
         return _err(exc.code, exc.message)
     payload = {
         "dry_run": False, "task_id": task_id, "grok_executed": True, "cwd": cwd,
+        "model": choice.describe(),
         "argv_preview": list(redact_argv_preview(plan.argv)),
         "execution_transport": outcome.execution_transport,
         "status": outcome.status, "returncode": outcome.returncode,
@@ -1294,7 +1355,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--executable", required=True, help="Absolute POSIX path to grok inside WSL")
     p_ask.add_argument("--cwd", default=None, help="Existing /tmp/gbbb-ask-<random> dir (default: mktemp on execute)")
     p_ask.add_argument("--max-turns", type=int, default=1)
-    p_ask.add_argument("--timeout", type=float, default=180.0)
+    p_ask.add_argument("--timeout", type=float, default=None,
+                       help="Seconds (default 180, or the alias timeout; ceiling 600, 1800 for custom_local aliases)")
+    p_ask.add_argument("--model", default=None, help="Grok Build model id or catalog key, passed verbatim as -m (not verified)")
+    p_ask.add_argument("--no-model-preference", action="store_true", help="Ignore the owner's preferred model; use Grok's implicit default")
+    p_ask.add_argument("--model-settings", default=None, help="Bridge model settings JSON (default: user config dir)")
     p_ask.add_argument("--task-id", default=None)
     p_ask.add_argument("--state-db", default=None, help="Used only with --execute")
     p_ask.add_argument("--owner", default="local-worker")
@@ -1303,6 +1368,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--show-answer", action="store_true", help="Print bounded answer text (transient; not stored)")
     p_ask.add_argument("--format", choices=["json", "text"], default="json")
     p_ask.set_defaults(func=cmd_ask)
+
+    p_ms = sub.add_parser("model-settings", help="Owner's bridge model preference and aliases (local file only; no Grok call)")
+    p_ms.add_argument("--settings", default=None, help="Path (default: user config dir model_settings.json)")
+    ms_sub = p_ms.add_subparsers(dest="ms_cmd", required=True)
+    ms_sub.add_parser("show")
+    p_sp = ms_sub.add_parser("set-preferred")
+    g = p_sp.add_mutually_exclusive_group(required=True)
+    g.add_argument("model_id", nargs="?")
+    g.add_argument("--clear", action="store_true")
+    p_aa = ms_sub.add_parser("add-alias", help="Register a Grok Build catalog key you configured yourself (e.g. LM-Studio)")
+    p_aa.add_argument("name")
+    p_aa.add_argument("--kind", choices=["custom_local", "custom_remote", "builtin"], default="custom_local")
+    p_aa.add_argument("--expect-usage-key", action="append", default=[],
+                      help="modelUsage key Grok reports for it (e.g. the provider model id); repeatable")
+    p_aa.add_argument("--timeout-sec", type=float, default=None)
+    p_aa.add_argument("--replace", action="store_true")
+    p_ra = ms_sub.add_parser("remove-alias")
+    p_ra.add_argument("name")
+    p_ms.set_defaults(func=cmd_model_settings)
 
     p_retry = sub.add_parser("jobs-retry", help="Explicit retry from failed/needs_review")
     p_retry.add_argument("--state-db", required=True)

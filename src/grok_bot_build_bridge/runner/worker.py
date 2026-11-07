@@ -162,7 +162,8 @@ def _commit_parsed_result(
     from .grok_result import classify, parse_grok_json_result
 
     s = parse_grok_json_result(
-        result.stdout, truncated=result.stdout_truncated, expected_text=plan.expected_text
+        result.stdout, truncated=result.stdout_truncated, expected_text=plan.expected_text,
+        expected_models=plan.expected_models,
     )
     summary = s.to_dict()
     if result.returncode == 0:

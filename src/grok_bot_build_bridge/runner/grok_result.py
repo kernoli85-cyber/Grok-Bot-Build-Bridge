@@ -20,7 +20,9 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-SUMMARY_SCHEMA = "gbbb.grok_result_summary/v1"
+SUMMARY_SCHEMA_V1 = "gbbb.grok_result_summary/v1"
+SUMMARY_SCHEMA = "gbbb.grok_result_summary/v2"  # v2 adds model_identity (status only, no names)
+MODEL_IDENTITY = ("not_requested", "confirmed", "mismatch", "unreported")
 MAX_RESULT_BYTES = 64 * 1024
 _SESSION_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _STOP_RE = re.compile(r"^[a-z_]{1,32}$")
@@ -62,6 +64,7 @@ class GrokResultSummary:
     expected_match: bool | None = None
     matched_text: str | None = None
     is_error: bool | None = None
+    model_identity: str = "not_requested"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -103,6 +106,7 @@ def parse_grok_json_result(
     *,
     truncated: bool = False,
     expected_text: str | None = None,
+    expected_models: tuple[str, ...] | None = None,
 ) -> GrokResultSummary:
     if truncated:
         return _fail("truncated")
@@ -189,7 +193,13 @@ def parse_grok_json_result(
         expected_match=match,
         matched_text=expected_text if match else None,
         is_error=is_error,
+        model_identity=_identity(obj.get("modelUsage"), expected_models),
     )
+
+
+def _identity(usage: Any, expected: tuple[str, ...] | None) -> str:
+    from ..model_select import model_identity
+    return model_identity(usage, expected)
 
 
 def classify(summary: GrokResultSummary, *, require_expected: bool) -> str | None:
@@ -200,6 +210,10 @@ def classify(summary: GrokResultSummary, *, require_expected: bool) -> str | Non
         return "model_result_not_ok"
     if require_expected and summary.expected_match is not True:
         return "smoke_text_mismatch"
+    if summary.model_identity == "mismatch":
+        return "model_identity_mismatch"
+    if summary.model_identity == "unreported":
+        return "model_identity_unverified"
     return None
 
 
@@ -211,7 +225,10 @@ def validate_summary(d: Any) -> bool:
     if not isinstance(d, dict):
         return False
     keys = set(GrokResultSummary.__dataclass_fields__)
-    if set(d) != keys or d["schema"] != SUMMARY_SCHEMA:
+    if d.get("schema") == SUMMARY_SCHEMA_V1:  # stored by <=0.23: no model_identity
+        if set(d) != keys - {"model_identity"}:
+            return False
+    elif d.get("schema") != SUMMARY_SCHEMA or set(d) != keys or d["model_identity"] not in MODEL_IDENTITY:
         return False
 
     def opt(v, t):

@@ -329,7 +329,7 @@ class JobStore:
         job is cancelled/terminal/needs_review or the lease is stale, nothing is
         written (an expired lease flips to needs_review without the result).
         """
-        from ..runner.grok_result import SUMMARY_SCHEMA, validate_summary
+        from ..runner.grok_result import validate_summary
 
         if terminal not in {JobStatus.SUCCEEDED, JobStatus.NEEDS_REVIEW, JobStatus.FAILED}:
             raise StoreError("illegal_transition", "result commit needs a terminal outcome")
@@ -359,7 +359,7 @@ class JobStore:
                     conn.execute(
                         "INSERT INTO job_results_v2(task_id, attempt, schema, summary_json, created_at)"
                         " VALUES (?,?,?,?,?)",
-                        (task_id, job.attempt, SUMMARY_SCHEMA, data, self.clock.time()),
+                        (task_id, job.attempt, summary["schema"], data, self.clock.time()),
                     )
                 except sqlite3.IntegrityError as exc:
                     raise StoreError("result_exists", "result already committed") from exc

@@ -83,6 +83,8 @@ class ApprovedExecutionPlan:
     parse_grok_json: bool = False
     expected_text: str | None = None
     return_answer: bool = False  # transient console display only; never persisted
+    # Owner-declared modelUsage keys for the -m model; None = no -m passed (implicit default).
+    expected_models: tuple[str, ...] | None = None
 
 
 def _reject_forbidden(tokens: Sequence[str]) -> None:
@@ -458,6 +460,7 @@ def build_wsl_grok_smoke_plan(
 ASK_MAX_PROMPT_BYTES = 8 * 1024          # far below the 32767-char Windows cmdline limit
 ASK_MAX_TURNS_LIMIT = 10
 ASK_MAX_TIMEOUT_SEC = 600.0
+ASK_LOCAL_MAX_TIMEOUT_SEC = 1800.0  # only for owner-registered custom_local aliases
 _ASK_CWD = re.compile(r"^/tmp/gbbb-ask-[A-Za-z0-9]{8,32}$")
 _PROMPT_BAD = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
 
@@ -497,6 +500,7 @@ def build_wsl_grok_ask_plan(
     prompt: str,
     max_turns: int = 1,
     timeout_sec: float = 180.0,
+    model: "ModelChoice | None" = None,
 ) -> ApprovedExecutionPlan:
     """Text-only single prompt via wsl.exe with the smoke's isolation flags/deny rules.
 
@@ -509,8 +513,16 @@ def build_wsl_grok_ask_plan(
     if isinstance(max_turns, bool) or not isinstance(max_turns, int) or not 1 <= max_turns <= ASK_MAX_TURNS_LIMIT:
         raise PlanError("max_turns_invalid", f"max_turns must be an int 1..{ASK_MAX_TURNS_LIMIT}")
     t = float(timeout_sec)
-    if not (t > 0 and t <= ASK_MAX_TIMEOUT_SEC):
-        raise PlanError("timeout_invalid", f"timeout must be 0..{ASK_MAX_TIMEOUT_SEC}s")
+    ceiling = ASK_MAX_TIMEOUT_SEC if model is None else min(model.timeout_ceiling_sec, ASK_LOCAL_MAX_TIMEOUT_SEC)
+    if not (t > 0 and t <= ceiling):
+        raise PlanError("timeout_invalid", f"timeout must be 0..{ceiling:g}s")
+    model_flags: tuple[str, ...] = ()
+    if model is not None and model.model_id is not None:
+        from ..model_select import ModelSelectionError, validate_model_id
+        try:
+            model_flags = ("--model", validate_model_id(model.model_id))
+        except ModelSelectionError as exc:
+            raise PlanError(exc.code, exc.message) from None
     p = validate_ask_prompt(prompt)
     smoke = build_wsl_grok_smoke_plan(
         task_id=task_id, distro=distro, user=user, grok_path=grok_path,
@@ -523,7 +535,7 @@ def build_wsl_grok_ask_plan(
         deny += ["--deny", r]
     head = ("wsl.exe", "-d", smoke.wsl_distro, "-u", smoke.wsl_user, "--cd", c,
             "--exec", "/usr/bin/env", *GROK_SMOKE_ENV, smoke.executable)
-    tail = ("--cwd", c, *flags, *deny)
+    tail = ("--cwd", c, *model_flags, *flags, *deny)
     _reject_forbidden(head + tail)  # prompt is a value, not a flag; checked separately
     argv = (*head, "--single", p, *tail)
     return ApprovedExecutionPlan(
@@ -535,6 +547,7 @@ def build_wsl_grok_ask_plan(
         execution_transport="wsl_exe", execution_kind="grok_ask_text_one_shot",
         wsl_distro=smoke.wsl_distro, wsl_user=smoke.wsl_user,
         parse_grok_json=True, expected_text=None,
+        expected_models=(model.expect_usage_keys if model_flags else None),
     )
 
 
