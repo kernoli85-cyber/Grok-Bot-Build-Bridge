@@ -333,7 +333,8 @@ def test_wheel_mcp_stdio_integration(tmp_path: Path):
         cwd=str(tmp_path),
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
-    assert probe.stdout.strip().startswith("0.15")
+    from grok_bot_build_bridge import __version__ as _v
+    assert probe.stdout.strip().startswith(_v)
     assert "site-packages" in probe.stdout.replace("\\", "/")
 
     state_dir = tmp_path / "mcp-state"
@@ -362,7 +363,7 @@ def test_wheel_mcp_stdio_integration(tmp_path: Path):
                 assert names == EXPECTED_TOOLS
                 r = await session.call_tool("bridge_runtime_info", {})
                 payload = _text_payload(r)
-                assert payload["package_version"].startswith("0.15")
+                assert payload["package_version"] == _v
 
     asyncio.run(body())
     # Hash recorded for CI visibility
