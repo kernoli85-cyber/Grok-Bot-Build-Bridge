@@ -1,0 +1,6 @@
+# Derived from observed grok 1.0.77 streaming-json (2026-11-07, -m LM-Studio). ids/paths/thought replaced; commands list omitted. Not a raw capture.
+{"type": "available_commands", "tools": []}
+{"type": "text", "data": "LOCAL"}
+{"type": "text", "data": "_BRIDGE"}
+{"type": "text", "data": "_OK"}
+{"type": "end", "stopReason": "end_turn", "sessionId": "00000000-0000-0000-0000-000000000004", "usage": {"input_tokens": 3581, "output_tokens": 47, "reasoning_tokens": 39, "total_tokens": 3628}, "num_turns": 1, "modelUsage": {"qwen3.5-9b-mtp": {"inputTokens": 3581, "outputTokens": 47, "modelCalls": 1}}}

@@ -373,7 +373,11 @@ GROK_SMOKE_PROMPT = "Antworte nur BRIDGE_OK"
 GROK_SMOKE_EXPECTED = "BRIDGE_OK"
 GROK_DENY_BUILTIN_TOOLS = (
     "run_terminal_cmd,read_file,grep,list_dir,search_replace,web_search,"
-    "web_fetch,todo_write,task,Agent"
+    "web_fetch,todo_write,task,Agent,"
+    # Observed on 1.0.77 (2026-11-07, streaming-json available_commands): these were still
+    # offered with only the list above. With them added, the observed tool list was [].
+    "monitor,search_tool,use_tool,workflow,enter_plan_mode,exit_plan_mode,ask_user_question,"
+    "send_feedback,image_gen,image_edit,image_to_video,reference_to_video,write"
 )
 # Bare-prefix deny rules match ALL invocations of that type (docs); deny beats
 # read-only auto-approval and every allow. MCPTool covers MCP meta/server tools,
