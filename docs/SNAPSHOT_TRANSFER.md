@@ -1,0 +1,185 @@
+# Repository snapshot transfer: architecture and security spec (draft v1)
+
+Status: **design + in-memory protocol codec only** (`snapshot_frames.py`, v0.21.0).
+There is no source reader, no receiver writer, no CLI and no wsl.exe streaming yet. No real repo
+has been read or copied. Nothing here reaches a model.
+
+## 1. Goal and non-goals
+- Goal: give a later, separately approved repo `ask` a **verified, private, disposable copy**
+  of owner-selected files inside the WSL distro where Grok runs, so that Grok never sees the
+  live repo.
+- Non-goals now: editing source, applying diffs, running git, hooks, submodules, package
+  managers or build tasks, and sending source content to logs, outbox, MCP or a model.
+
+## 2. Threat model (what can go wrong)
+- The repo is **untrusted input**: symlinks/junctions/reparse points to secrets, hard links
+  aliasing files outside the root, FIFOs and devices that block or leak, path names built for
+  traversal (`..`, drive, UNC, ADS, reserved names, Unicode/case tricks), huge files and bombs,
+  instruction files (AGENTS.md, rules) trying to steer the model.
+- A **concurrent local process** can swap files or directories between check and use (TOCTOU).
+  A metadata preflight (`repo-plan`, v0.20.0) therefore never secures the copy by itself.
+- The **receiver** may get a corrupted, truncated or hostile stream.
+- Secrets in source code: detection is heuristic only. **No tool can promise a selection
+  contains no secrets.** The owner must confirm the file list (with `--reveal-paths`) and
+  separately approve disclosure to the model.
+
+## 3. Supported routes (fail closed for everything else)
+| Route | v1 status | Reason |
+|---|---|---|
+| WSL ext4 repo → WSL temp dir (same distro) | **Planned v1** | POSIX `dir_fd` + `O_NOFOLLOW` walk is available in the Python stdlib on Linux |
+| Windows NTFS repo → WSL | **Unsupported, fail closed** | see §4.2 |
+| Windows repo read from WSL through `/mnt/c` (drvfs) | **Unsupported** | reparse and hard-link semantics on drvfs are not verified; metadata may not match NTFS |
+| Any → network / other machines | Out of scope | — |
+
+## 4. Source reader (secure opener)
+### 4.1 POSIX (inside WSL), planned
+- Open the root with `os.open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)` after
+  verifying that no ancestor is a symlink (as `repo-plan` does), then `fstat`: it must be a directory.
+- Reach every file **one component at a time** with `os.open(name, flags, dir_fd=parent_fd)`.
+  Directories use `O_DIRECTORY | O_NOFOLLOW`; files use `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`,
+  so a FIFO swapped in cannot block. `O_NOFOLLOW` only guards the final component, which is why
+  the walk is per component and never resolves a multi-part path.
+- Linux `openat2(RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV)` would be stronger,
+  but Python has no stdlib binding. It is an optional future ctypes path, not assumed.
+- After open, `fstat(fd)` must show `S_ISREG`, `st_nlink == 1`, the same `st_dev` as the root,
+  and size ≤ limit. Read at most `size + 1` bytes: a read beyond the fstat size, or fewer bytes
+  than it, aborts the file as changed. `fstat` again after reading; size, mtime_ns and inode must match.
+- Names come from `os.scandir(dir_fd)` / `os.listdir(fd)`, are NFC-checked, and are revalidated
+  with the same lexical rules as `repo-plan` (secret names, excluded dirs, reserved names).
+- Remaining honest gap: a file can still be **modified in place** between the two fstats
+  without changing the metadata we compare. The copy is consistent per the checks, not a
+  filesystem-level atomic snapshot.
+
+### 4.2 Windows NTFS, unsupported for now (no faked security)
+A safe Windows walk needs handle-relative opens (`NtCreateFile` with `RootDirectory`, or
+`CreateFileW` with `FILE_FLAG_OPEN_REPARSE_POINT` per component plus `GetFileInformationByHandle`
+for the link count and reparse attribute, and `GetFinalPathNameByHandleW` to verify the final path).
+The Python stdlib exposes none of this. `os.lstat` followed by `open` is a race. Until a
+reviewed ctypes or native implementation exists, with tests on real NTFS junctions, symlinks
+and hard links, a Windows-source request is refused with `windows_source_unsupported`.
+Workaround for owners: keep the repo inside the WSL filesystem.
+
+## 5. Transport
+- v1 (WSL → WSL): reader and receiver both run **inside the same distro as the non-root
+  owner user**. They are started by the Windows companion through the existing fixed route:
+  `wsl.exe -d <distro> -u <user> --cd /tmp --exec <fixed absolute path to the companion
+  entrypoint inside WSL> snapshot-receive ...`. There is no shell, no `bash -c`, no `python -c`
+  code strings, and no caller-provided interpreter. The stream is a local pipe between two
+  processes on one machine. It is **not internet traffic and not encrypted**; it never touches
+  Grok Bot account transport or the webhook.
+- Framing: `gbbb.snapshot/v1` (implemented, in memory). Magic; length-prefixed JSON manifest
+  (schema, exact `{path,size}` entries); per file a u64 length equal to the manifest size, the
+  bytes and a SHA-256 trailer; then END with the file count and a SHA-256 over the whole stream;
+  nothing after it.
+- Explicitly **no archive formats** (tar/zip): no extraction step, so no tar-slip, no link
+  entries, no permission bits and no compression bombs. A stream starting with a ZIP or TAR
+  signature fails `bad_magic`.
+- Bounds enforced before allocation: manifest ≤ 256 KiB, ≤ 200 files, ≤ 256 KiB per file,
+  ≤ 2 MiB total, path ≤ 1024 bytes, reads in chunks of at most 64 KiB.
+- Credentials: none in the stream, argv or env. The receiver gets no secrets.
+
+## 6. Receiver (filesystem writer), planned, not implemented
+- Destination: a fresh `mktemp -d /tmp/gbbb-repo-XXXXXXXXXXXX` (mode 0700, owned by the owner
+  user, **never root**), verified like the `ask` cwd (real dir, empty, owner, not group- or
+  world-writable).
+- It validates the manifest again independently (same codec: canonical NFC paths, no traversal,
+  no ADS/drive/UNC, no case duplicates, no file-vs-directory prefix conflicts, secret/excluded
+  names refused).
+- It creates directories with `mkdir(name, 0o700, dir_fd=parent)` and files with
+  `open(name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600, dir_fd=...)`. It never follows
+  or creates links, devices or FIFOs.
+- All-or-nothing: data is written into a staging subdir and marked complete (a `COMPLETE`
+  marker) only after END verifies. On any error the receiver deletes **only its own staging
+  dir, by its own dir fd**. It never deletes anything outside the random folder and never
+  touches the source repo.
+- TTL: snapshot folders carry a creation timestamp. A cleanup command (future) removes only
+  `/tmp/gbbb-repo-*` dirs owned by the user, older than the TTL (default 24 h), after
+  re-verifying ownership. No recursive delete follows links.
+
+## 7. Model-facing boundary (later, separately approved)
+- No source content goes to logs, outbox, MCP or a model until the owner has (1) seen the file
+  list and (2) approved this specific disclosure.
+- Repo instruction files are untrusted data and are listed as such. `.git`, rule and hook
+  dirs and credentials are excluded by default.
+- **Tool isolation is not proven.** The 10:00 smoke run's exit 0, or even a future `BRIDGE_OK`,
+  does not prove that Grok's deny rules work. Proving enforcement needs a dedicated, approved
+  negative test: plant a harmless canary file outside the snapshot, instruct the model to read
+  or modify it, and verify that the attempt is denied and the canary is unchanged. That test is
+  not requested yet.
+
+## 8. Apply boundary (design only)
+The bridge never edits source. A later proposed-diff mode will return a bounded unified diff
+computed between the snapshot and its post-run copy, without running git or hooks. Applying it
+to the real repo will be a separate owner-run step with path re-validation. No auto-apply.
+
+## 9. Blockers
+1. **Companion inside WSL:** the v1 route needs the companion package installed inside the
+   WSL distro (today it is only in the Windows venv). That is a host install and needs owner approval.
+2. **Real-output validation:** one approved `ask` to confirm the 1.0.70 JSON shape; later the
+   canary enforcement test (§7).
+3. **Windows-source support** needs a reviewed handle-based implementation (§4.2).
+4. Distribution of the per-user app (packaging/signing) is unsolved, but it does not block the
+   POSIX reader/receiver work, which can be built and tested on the box with fixture trees.
+
+## Status v0.22.0: POSIX reader + receiver library (no CLI)
+
+`grok_bot_build_bridge.snapshot_posix` implements both ends as a library only; no
+user-facing command, no MCP exposure, no model call. Windows/non-POSIX fails closed
+(`require_platform`). Production refuses euid 0; only tests inject a uid.
+
+Reader: dirfd chain with `O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC`, files `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`,
+regular + `nlink==1` + same device + size limits + exact post-read fstat/lstat identity.
+Symlinks (files and dirs), symlinked parents, FIFOs/devices, hard links, mount boundaries,
+secrets and excluded dirs are skipped with counted reasons; instruction files excluded by default.
+
+Receiver: fresh `gbbb-repo-*` 0700 dir under a verified trusted staging parent, fd-relative
+`O_EXCL` 0600 creates, `INCOMPLETE` marker until the whole stream verifies, then `COMPLETE`.
+On failure it removes only its own dir without following symlinks; a SIGKILL leftover stays
+private and `INCOMPLETE`. TTL cleanup is design only.
+
+Honest limits: in-place same-size modification with restored timestamps, and inode reuse after
+unlink+recreate, cannot be fully detected; a hostile same-user process is out of scope.
+
+## Status v0.23.0: real pipe integration between separate processes (still no CLI)
+
+- `send_report(report, fd, deadline_s=, cancel=)` and `receive_snapshot(fd, ..., deadline_s=, cancel=)`
+  use raw fds with `select()` slices (0.1 s): a stalled writer or reader hits `deadline_exceeded`,
+  a set `threading.Event` gives `cancelled`, and `BrokenPipe` becomes `peer_closed`. Writes are
+  chunked to `PIPE_BUF` so a blocking pipe can't stall past the deadline (a real bug found by
+  these tests). The pipe is never `fstat`ed or seeked; EOF means `read() == b""`. Deadline/cancel
+  on a non-fd stream is refused rather than silently ignored.
+- Memory: the reader holds at most `max_total_bytes` (default 2 MiB) in RAM; the receiver streams
+  in 64 KiB chunks straight to 0600 files. Every fd is closed on all paths (checked via `/proc/self/fd`).
+- `COMPLETE` is written only after every file hash, the stream hash and the trailing-EOF check pass.
+  Payload paths live under `files/`, so a manifest entry named `COMPLETE`/`INCOMPLETE` cannot
+  collide with the markers (tested).
+- Publication: the snapshot dir is a fresh random name created with exclusive `mkdir` (0700) in a
+  verified staging parent; an existing dir is never reused. Consumers must check `COMPLETE` and
+  ownership; another user cannot enter the 0700 dir, the SAME user can (out of scope).
+- Root: production uses `os.geteuid()`; the injectable `uid_provider` was removed from the public
+  API. Tests run as the real non-root user (box uid 1000, GitHub's `runner`) and skip under root.
+  Root refusal is tested by monkeypatching `os.geteuid` in-test only.
+- Source dirs owned by someone other than the caller/root, or writable by group/other, are refused
+  (`untrusted_dir`): another user could swap in their content under a trusted name.
+- Content: selected files are sent in full. The secret filter is name-based only and can't promise
+  that no secret is inside a file.
+- Crash (`os._exit`/SIGKILL): the leftover is 0700, keeps `INCOMPLETE`, and never `COMPLETE` (tested).
+  TTL cleanup is still design only.
+- Packaging: the installed wheel runs a reader child -> real pipe -> receiver child smoke offline,
+  and asserts that `uid_provider` is absent and root is refused.
+
+### Bandit review (v0.23.0)
+The 5 B101 `assert` invariants were replaced by explicit raises (asserts vanish under `-O`).
+What remains, reviewed:
+- B108 (9): fixed WSL argv strings for `mktemp -d` and a `find` check, a dry-run placeholder,
+  the `jobs-demo` default, and the receiver default `/tmp`, which is verified root-owned and
+  sticky, with a fresh exclusive 0700 dir inside it.
+- B404/B603 (4): `shell=False` argv execution, by design.
+- B110 (4): best-effort cleanup or close.
+- B105/B106: redaction constants, not secrets.
+- B311: deterministic retry jitter, not security.
+
+### Correction
+Earlier notes said a Windows handle-based reader "needs owner approval". That was wrong: designing
+and writing it in box code needs no new approval. Only installing or testing it on the user's
+host does.

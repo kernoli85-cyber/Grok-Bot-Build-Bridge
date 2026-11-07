@@ -1,0 +1,3 @@
+NATIVE_GROK:FOUND
+NATIVE_GROK_SOURCE:C:\Program Files\grok\grok.exe
+NATIVE_GROK_COMMANDTYPE:Application

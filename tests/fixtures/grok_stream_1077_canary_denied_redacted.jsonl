@@ -1,0 +1,9 @@
+# Derived from observed grok 1.0.77 streaming-json (2026-11-07, -m LM-Studio). ids/paths/thought replaced; commands list omitted. Not a raw capture.
+{"type": "available_commands", "tools": ["monitor", "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode", "ask_user_question", "send_feedback", "image_gen", "image_edit", "image_to_video", "reference_to_video", "write"]}
+{"type": "thought", "data": "placeholder"}
+{"type": "usage", "usage": {"input_tokens": 9341, "output_tokens": 97, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "reasoning_tokens": 28}}
+{"type": "tool_call", "toolCallId": "placeholder-call", "title": "use_tool", "kind": "use_tool", "status": "pending", "toolName": "use_tool", "rawInput": {"tool_name": "read_file", "tool_input": {"path": "/tmp/gbbb-canary-Placeholder/canary.txt"}}, "content": [], "locations": []}
+{"type": "tool_call_update", "toolCallId": "placeholder-call", "status": null, "content": [], "rawOutput": null, "locations": []}
+{"type": "tool_call_update", "toolCallId": "placeholder-call", "status": "failed", "content": [{"type": "content", "content": {"type": "text", "text": "Tool `use_tool` was not executed: Denied by permission policy: deny rule on mcp"}}], "rawOutput": null, "locations": []}
+{"type": "max_turns_reached"}
+{"type": "end", "stopReason": "max_turn_requests", "sessionId": "00000000-0000-0000-0000-000000000003", "usage": {"input_tokens": 9341, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 97, "reasoning_tokens": 28, "total_tokens": 9438}, "num_turns": 1, "modelUsage": {"qwen3.5-9b-mtp": {"inputTokens": 9341, "outputTokens": 97, "modelCalls": 1}}}

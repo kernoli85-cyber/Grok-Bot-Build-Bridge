@@ -1,0 +1,43 @@
+# Secrets / local auth — never commit
+**/.config/
+**/webhook.json
+**/*secret*
+**/*credential*
+**/*.pem
+**/*.key
+!**/tests/fixtures/**
+.ssh/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+src/*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Test / coverage
+.coverage
+htmlcov/
+.tox/
+
+# App state DB (never commit)
+**/*.sqlite
+**/*.sqlite3
+**/*.db
+.state/
+.bridge-state/

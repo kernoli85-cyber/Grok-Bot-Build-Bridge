@@ -1,0 +1,2 @@
+  NAME      STATE           VERSION
+* Ubuntu    Running         2
