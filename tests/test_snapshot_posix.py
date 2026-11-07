@@ -1,6 +1,6 @@
 """POSIX snapshot reader/receiver on FAKE fixture trees only. Linux-positive; Windows is
-asserted to fail closed. uid_provider is injected ONLY so root CI hosts can exercise the
-code; production default is os.geteuid and root is refused."""
+asserted to fail closed. Runs as the real non-root test user; the identity is NOT injectable
+(production uses os.geteuid). Root refusal is tested by monkeypatching os.geteuid in-test."""
 import io
 import os
 import stat
@@ -13,20 +13,22 @@ from grok_bot_build_bridge import snapshot_posix as S
 from grok_bot_build_bridge.snapshot_frames import FrameLimits, encode
 
 posix = pytest.mark.skipif(os.name != "posix", reason="POSIX-only library")
-USER = lambda: 4242 if os.geteuid() == 0 else os.geteuid()  # noqa: E731
+pytestmark = pytest.mark.skipif(os.name == "posix" and os.geteuid() == 0,
+                                reason="must run as a real non-root user (production refuses root)")
 
 
 def test_windows_or_missing_primitives_fail_closed(monkeypatch):
     monkeypatch.setattr(S.os, "name", "nt")
     with pytest.raises(S.SnapshotError) as e:
-        S.read_selection("/x", ["a"], uid_provider=USER)
+        S.read_selection("/x", ["a"])
     assert e.value.code == "platform_unsupported"
 
 
 @posix
-def test_root_refused_by_default_policy(tmp_path):
-    for fn in (lambda: S.read_selection(str(tmp_path), ["a"], uid_provider=lambda: 0),
-               lambda: S.receive_snapshot(io.BytesIO(b""), str(tmp_path), uid_provider=lambda: 0)):
+def test_root_refused_by_default_policy(tmp_path, monkeypatch):
+    monkeypatch.setattr(S.os, "geteuid", lambda: 0)
+    for fn in (lambda: S.read_selection(str(tmp_path), ["a"]),
+               lambda: S.receive_snapshot(io.BytesIO(b""), str(tmp_path))):
         with pytest.raises(S.SnapshotError) as e:
             fn()
         assert e.value.code == "root_refused"
@@ -47,7 +49,7 @@ def _repo(tmp_path):
 @posix
 def test_reader_positive_and_privacy_summary(tmp_path):
     r = _repo(tmp_path)
-    rep = S.read_selection(str(r), ["src"], uid_provider=USER)
+    rep = S.read_selection(str(r), ["src"])
     assert [p for p, _ in rep.files] == ["src/pkg/a.py", "src/pkg/b.txt"]
     sm = rep.summary()
     assert sm["skipped_by_reason"] == {"excluded_dir": 1, "instruction_file_excluded": 1, "secret_like": 1}
@@ -64,7 +66,7 @@ def test_reader_rejects_symlinks_fifo_hardlink_parent_and_root(tmp_path):
     os.symlink(out, r / "src" / "dirlink")
     os.mkfifo(r / "src" / "pkg" / "fifo")
     os.link(r / "src" / "pkg" / "b.txt", r / "src" / "pkg" / "b_alias.txt")
-    rep = S.read_selection(str(r), ["src", "dirlink/s.txt"], uid_provider=USER)
+    rep = S.read_selection(str(r), ["src", "dirlink/s.txt"])
     assert [p for p, _ in rep.files] == ["src/pkg/a.py"]
     sk = rep.skipped
     # dir symlink seen during the walk is skipped as a symlink entry (never opened)
@@ -72,7 +74,7 @@ def test_reader_rejects_symlinks_fifo_hardlink_parent_and_root(tmp_path):
     assert sk["missing"] == 1 and "symlink_dir" not in sk
     os.symlink(r, tmp_path / "rootlink")
     with pytest.raises(S.SnapshotError) as e:
-        S.read_selection(str(tmp_path / "rootlink"), ["src"], uid_provider=USER)
+        S.read_selection(str(tmp_path / "rootlink"), ["src"])
     assert e.value.code == "symlink_or_not_dir"
 
 
@@ -111,7 +113,7 @@ def test_swaps_at_each_boundary(tmp_path, stage, action, reason):
             os.utime(target, ns=(1, 1))
         elif action == "hardlink":
             os.link(target, tmp_path / "alias")
-    rep = S.read_selection(str(r), ["src/pkg/a.py"], uid_provider=USER, _hook=hook)
+    rep = S.read_selection(str(r), ["src/pkg/a.py"], _hook=hook)
     assert rep.files == [] and rep.skipped == {reason: 1}
 
 
@@ -126,7 +128,7 @@ def test_parent_dir_swapped_for_symlink(tmp_path):
         if st == "pre_parent_open":
             os.rename(r / "src", tmp_path / "moved")
             os.symlink(out, r / "src")
-    rep = S.read_selection(str(r), ["src/pkg/a.py"], uid_provider=USER, _hook=hook)
+    rep = S.read_selection(str(r), ["src/pkg/a.py"], _hook=hook)
     assert rep.files == [] and rep.skipped == {"symlink_dir": 1}
 
 
@@ -137,7 +139,7 @@ def test_limits_before_read(tmp_path):
     for i in range(5):
         (r / "d" / f"f{i}").write_bytes(b"x" * 100)
     (r / "d" / "big").write_bytes(b"x" * 5000)
-    rep = S.read_selection(str(r), ["d"], uid_provider=USER,
+    rep = S.read_selection(str(r), ["d"],
                            limits=S.ReadLimits(max_files=3, max_file_bytes=1000))
     assert len(rep.files) == 3 and rep.skipped["file_too_large"] == 1 and rep.skipped["over_limit"] == 2
 
@@ -156,13 +158,13 @@ def test_end_to_end_reader_pipe_receiver(tmp_path):
     r = _repo(tmp_path)
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o700)
-    rep = S.read_selection(str(r), ["src"], uid_provider=USER)
+    rep = S.read_selection(str(r), ["src"])
     rfd, wfd = os.pipe()
     res = {}
 
     def recv():
         with os.fdopen(rfd, "rb") as rf:
-            res["r"] = S.receive_snapshot(rf, str(stage), uid_provider=USER)
+            res["r"] = S.receive_snapshot(rf, str(stage))
     t = threading.Thread(target=recv)
     t.start()
     with os.fdopen(wfd, "wb") as wf:
@@ -186,7 +188,7 @@ def test_receiver_corruption_cleans_only_own_dir(tmp_path):
     data = bytearray(_stream([("a.txt", b"hello"), ("d/b.txt", b"world")]).getvalue())
     data[data.index(b"world")] ^= 1
     with pytest.raises(S.SnapshotError) as e:
-        S.receive_snapshot(io.BytesIO(bytes(data)), str(stage), uid_provider=USER)
+        S.receive_snapshot(io.BytesIO(bytes(data)), str(stage))
     assert e.value.code == "file_hash_mismatch"
     assert os.listdir(stage) == ["unrelated"] and (stage / "unrelated").read_text() == "keep me"
 
@@ -198,7 +200,7 @@ def test_receiver_truncation_no_partial_commit(tmp_path, cut):
     stage.mkdir(mode=0o700)
     data = _stream([("a.txt", b"hello"), ("b.txt", b"x" * 1000)]).getvalue()
     with pytest.raises(S.SnapshotError):
-        S.receive_snapshot(io.BytesIO(data[:cut]), str(stage), uid_provider=USER)
+        S.receive_snapshot(io.BytesIO(data[:cut]), str(stage))
     assert os.listdir(stage) == []
 
 
@@ -215,7 +217,7 @@ def test_cleanup_does_not_follow_planted_symlink(tmp_path):
     data = bytearray(_stream([("a.txt", b"hello")]).getvalue())
     data[-1] ^= 1
     with pytest.raises(S.SnapshotError):
-        S.receive_snapshot(io.BytesIO(bytes(data)), str(stage), uid_provider=USER, _after_create=plant)
+        S.receive_snapshot(io.BytesIO(bytes(data)), str(stage), _after_create=plant)
     assert (victim / "precious.txt").read_text() == "do not delete" and os.listdir(stage) == []
 
 
@@ -229,7 +231,7 @@ def test_interrupted_receiver_leaves_private_incomplete(tmp_path, monkeypatch):
         def read(self, n=-1):
             raise KeyboardInterrupt
     with pytest.raises(KeyboardInterrupt):
-        S.receive_snapshot(Boom(), str(stage), uid_provider=USER)
+        S.receive_snapshot(Boom(), str(stage))
     left = os.listdir(stage)
     assert len(left) == 1 and left[0].startswith(S.PREFIX)
     snap = stage / left[0]
@@ -243,11 +245,11 @@ def test_untrusted_staging_parent_refused(tmp_path):
     loose.mkdir()
     os.chmod(loose, 0o777)
     with pytest.raises(S.SnapshotError) as e:
-        S.receive_snapshot(_stream([("a", b"x")]), str(loose), uid_provider=USER)
+        S.receive_snapshot(_stream([("a", b"x")]), str(loose))
     assert e.value.code in {"staging_parent_untrusted"}
     os.symlink(tmp_path, tmp_path / "linkparent")
     with pytest.raises(S.SnapshotError) as e:
-        S.receive_snapshot(_stream([("a", b"x")]), str(tmp_path / "linkparent"), uid_provider=USER)
+        S.receive_snapshot(_stream([("a", b"x")]), str(tmp_path / "linkparent"))
     assert e.value.code == "symlink_or_not_dir"
     assert os.listdir(loose) == []
 
@@ -257,9 +259,9 @@ def test_no_archives_and_bounded(tmp_path):
     stage = tmp_path / "stage"
     stage.mkdir(mode=0o700)
     with pytest.raises(S.SnapshotError) as e:
-        S.receive_snapshot(io.BytesIO(b"PK\x03\x04" + b"\0" * 40), str(stage), uid_provider=USER)
+        S.receive_snapshot(io.BytesIO(b"PK\x03\x04" + b"\0" * 40), str(stage))
     assert e.value.code == "bad_magic" and os.listdir(stage) == []
     with pytest.raises(S.SnapshotError) as e:
-        S.receive_snapshot(_stream([("a", b"x" * 10)]), str(stage), uid_provider=USER,
+        S.receive_snapshot(_stream([("a", b"x" * 10)]), str(stage),
                            limits=FrameLimits(max_file_bytes=5))
     assert e.value.code == "size_invalid"

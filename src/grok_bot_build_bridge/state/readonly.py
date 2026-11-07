@@ -120,7 +120,8 @@ class ReadOnlyState:
         return self.info
 
     def _q(self, sql: str, args: tuple = ()) -> list[sqlite3.Row]:
-        assert self._conn is not None, "open() first"
+        if self._conn is None:
+            raise RuntimeError("open() first")
         try:
             return self._conn.execute(sql, args).fetchall()
         except sqlite3.Error:

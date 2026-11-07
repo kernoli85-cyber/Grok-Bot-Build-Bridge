@@ -18,7 +18,7 @@ Honest limits (see docs/SNAPSHOT_TRANSFER.md):
   that restores timestamps can defeat the stat comparison. Not an atomic snapshot.
 - A hostile process running as the SAME user is out of scope (it can do anything we can).
 - SIGKILL/crash cannot be cleaned up; leftovers stay private (0700) and marked INCOMPLETE.
-- Running as root is refused (identity is injectable ONLY for tests on root CI hosts).
+- Running as root is refused (os.geteuid(); not injectable from the public API).
 - Windows / non-POSIX: refused (platform_unsupported); no lstat-based fallback.
 """
 from __future__ import annotations
@@ -27,6 +27,9 @@ import errno
 import io
 import os
 import secrets
+import select
+import threading
+import time
 import stat
 from dataclasses import dataclass
 from typing import BinaryIO, Callable
@@ -57,8 +60,9 @@ def require_platform() -> None:
         raise SnapshotError("platform_unsupported", "secure dir-fd file access unavailable on this platform")
 
 
-def _refuse_root(uid_provider: Callable[[], int]) -> int:
-    uid = uid_provider()
+def _refuse_root() -> int:
+    """Production policy, not injectable: the effective uid of THIS process is used."""
+    uid = os.geteuid()
     if uid == 0:
         raise SnapshotError("root_refused", "snapshot reader/receiver must not run as root")
     return uid
@@ -90,6 +94,15 @@ def _open_dir_chain(path: str) -> int:
 
 # ------------------------------- reader ---------------------------------
 
+def _check_dir_trust(st: os.stat_result, uid: int) -> None:
+    """Source dirs must be owned by the caller (or root) and not writable by group/other.
+
+    A dir writable by another user lets that user swap entries between our checks; with
+    dir fds + O_NOFOLLOW that can't redirect us outside, but it could feed us attacker
+    content under a trusted name, so such dirs are refused instead of read."""
+    if st.st_uid not in (uid, 0) or (st.st_mode & 0o022):
+        raise SnapshotError("untrusted_dir", "directory not owned by caller/root or writable by group/other")
+
 @dataclass(frozen=True)
 class ReadLimits:
     max_files: int = 200
@@ -115,10 +128,9 @@ _BeforeRead = Callable[[str, str], None]  # test hook: (stage, relpath)
 
 def read_selection(root: str, selections: list[str], *, limits: ReadLimits = ReadLimits(),
                    include_instruction_files: bool = False,
-                   uid_provider: Callable[[], int] = os.geteuid if hasattr(os, "geteuid") else (lambda: -1),
                    _hook: _BeforeRead | None = None) -> ReadReport:
     require_platform()
-    _refuse_root(uid_provider)
+    uid = _refuse_root()
     if not selections:
         raise SnapshotError("selection_required", "explicit selections required")
     try:
@@ -126,6 +138,11 @@ def read_selection(root: str, selections: list[str], *, limits: ReadLimits = Rea
     except PlanRefused as exc:
         raise SnapshotError(exc.code, exc.message) from None
     root_fd = _open_dir_chain(root)
+    try:
+        _check_dir_trust(os.fstat(root_fd), uid)
+    except BaseException:
+        os.close(root_fd)
+        raise
     hook = _hook or (lambda s, p: None)
     out: dict[str, bytes] = {}
     skipped: dict[str, int] = {}
@@ -233,9 +250,16 @@ def read_selection(root: str, selections: list[str], *, limits: ReadLimits = Rea
                 skip("symlink_dir" if exc.errno in (errno.ELOOP, errno.ENOTDIR)
                      else "missing" if exc.errno == errno.ENOENT else "open_failed")
                 return None
-            if os.fstat(fd).st_dev != root_dev:
+            dst = os.fstat(fd)
+            if dst.st_dev != root_dev:
                 os.close(fd)
                 skip("other_filesystem")
+                return None
+            try:
+                _check_dir_trust(dst, uid)
+            except SnapshotError:
+                os.close(fd)
+                skip("untrusted_dir")
                 return None
             return fd
 
@@ -280,6 +304,69 @@ def encode_report(report: ReadReport, out: BinaryIO, *, limits: FrameLimits = Fr
     if not report.files:
         raise SnapshotError("nothing_to_send", "no eligible files")
     encode(report.files, out, limits=limits)
+
+
+# --------------------------- bounded pipe I/O ---------------------------
+
+_POLL_SLICE = 0.1
+
+
+class _Bounded:
+    def __init__(self, fd: int, deadline_s: float | None, cancel) -> None:
+        self.fd = fd
+        self.end = None if deadline_s is None else time.monotonic() + deadline_s
+        self.cancel = cancel
+
+    def _wait(self, want_read: bool) -> None:
+        while True:
+            if self.cancel is not None and self.cancel.is_set():
+                raise SnapshotError("cancelled", "transfer cancelled")
+            left = _POLL_SLICE if self.end is None else min(_POLL_SLICE, self.end - time.monotonic())
+            if left <= 0:
+                raise SnapshotError("deadline_exceeded", "transfer deadline exceeded")
+            r, w, _ = select.select([self.fd] if want_read else [], [] if want_read else [self.fd], [], left)
+            if r or w:
+                return
+
+
+class _FdReader(_Bounded):
+    """Raw fd reader (no buffering, no fstat); EOF = read() returns b''."""
+
+    def read(self, n: int = -1) -> bytes:
+        self._wait(True)
+        return os.read(self.fd, 65536 if n is None or n < 0 else min(n, 65536))
+
+
+class _FdWriter(_Bounded):
+    def write(self, b: bytes) -> int:
+        view = memoryview(b)
+        while view:
+            self._wait(False)
+            try:
+                # select() writable guarantees >= PIPE_BUF free on pipes, so a chunk of
+                # PIPE_BUF never blocks a blocking fd past the deadline.
+                n = os.write(self.fd, view[:getattr(select, "PIPE_BUF", 512)])
+            except BrokenPipeError:
+                raise SnapshotError("peer_closed", "receiver closed the pipe") from None
+            view = view[n:]
+        return len(b)
+
+    def flush(self) -> None:
+        pass
+
+
+def send_report(report: "ReadReport", fd: int, *, limits: FrameLimits = FrameLimits(),
+                deadline_s: float | None = None, cancel=None) -> None:
+    """Frame a ReadReport onto a pipe/socket fd with deadline/cancel; BrokenPipe -> peer_closed.
+    Does not close fd (caller owns it)."""
+    require_platform()
+    _refuse_root()
+    if not report.files:
+        raise SnapshotError("nothing_to_send", "no eligible files")
+    try:
+        encode(report.files, _FdWriter(fd, deadline_s, cancel), limits=limits)
+    except FrameError as exc:
+        raise SnapshotError(exc.code, exc.message) from None
 
 
 # ------------------------------- receiver -------------------------------
@@ -373,11 +460,16 @@ class _DiskSink(FileSink):
 
 def receive_snapshot(stream: BinaryIO, staging_parent: str = "/tmp", *,
                      limits: FrameLimits = FrameLimits(),
-                     uid_provider: Callable[[], int] = os.geteuid if hasattr(os, "geteuid") else (lambda: -1),
+                     deadline_s: float | None = None,
+                     cancel: "threading.Event | None" = None,
                      _after_create: Callable[[str], None] | None = None) -> ReceiveResult:
     """Decode a gbbb.snapshot/v1 stream into a fresh private dir. All-or-nothing."""
     require_platform()
-    uid = _refuse_root(uid_provider)
+    uid = _refuse_root()
+    if isinstance(stream, int):
+        stream = _FdReader(stream, deadline_s, cancel)
+    elif deadline_s is not None or cancel is not None:
+        raise SnapshotError("deadline_needs_fd", "deadline/cancel require a raw pipe fd")
     parent_fd = _open_dir_chain(staging_parent)
     name = PREFIX + secrets.token_hex(8)
     created = False

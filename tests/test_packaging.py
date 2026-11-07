@@ -269,3 +269,42 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     r = cli("outbox-pump", "--state-db", str(db))  # dry-run default; no --send
     assert r.returncode == 0, r.stdout + r.stderr
     assert "0d3f-AB_9" not in r.stdout and "BRIDGE_OK" not in r.stdout
+
+
+@pytest.mark.skipif(os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0),
+                    reason="POSIX non-root only; Windows fails closed")
+def test_installed_wheel_snapshot_pipe_smoke_offline(built_artifacts, tmp_path):
+    """Installed wheel: fake tree -> reader child -> real pipe -> receiver child. No hooks used,
+    no uid injection exists in the public API, root refused, network blackholed."""
+    wheel, _ = built_artifacts
+    venv_dir = tmp_path / "venv"
+    venv.create(venv_dir, with_pip=True)
+    py = venv_dir / "bin" / "python"
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env.update(PYTHONNOUSERSITE="1", HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9")
+    r = _run([str(py), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel)], env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    repo = tmp_path / "repo" / "src"
+    repo.mkdir(parents=True)
+    (repo / "a.py").write_text("print('fake')\n")
+    stage = tmp_path / "stage"
+    stage.mkdir(mode=0o700)
+    check = ("import inspect, grok_bot_build_bridge.snapshot_posix as S, sys\n"
+             "assert 'site-packages' in S.__file__\n"
+             "for f in (S.read_selection, S.receive_snapshot, S.send_report):\n"
+             " assert 'uid_provider' not in inspect.signature(f).parameters\n"
+             "S.os.geteuid = lambda: 0\n"
+             "try:\n S.read_selection(sys.argv[1], ['src'])\nexcept S.SnapshotError as e:\n print(e.code)\n")
+    r = _run([str(py), "-c", check, str(tmp_path / "repo")], env=env)
+    assert r.returncode == 0 and r.stdout.strip() == "root_refused", r.stdout + r.stderr
+    send = subprocess.Popen([str(py), "-c", "import sys, grok_bot_build_bridge.snapshot_posix as S\n"
+                             "S.send_report(S.read_selection(sys.argv[1], ['src']), 1, deadline_s=20)",
+                             str(tmp_path / "repo")], stdout=subprocess.PIPE, env=env)
+    recv = subprocess.run([str(py), "-c", "import sys, grok_bot_build_bridge.snapshot_posix as S\n"
+                           "r = S.receive_snapshot(0, sys.argv[1], deadline_s=20); print(r.file_count)",
+                           str(stage)], stdin=send.stdout, capture_output=True, text=True, env=env, timeout=60)
+    send.stdout.close()
+    assert send.wait(30) == 0 and recv.returncode == 0 and recv.stdout.strip() == "1", recv.stderr
+    (snap,) = os.listdir(stage)
+    assert sorted(os.listdir(stage / snap)) == ["COMPLETE", "files"]
+    assert (stage / snap / "files" / "src" / "a.py").read_text() == "print('fake')\n"

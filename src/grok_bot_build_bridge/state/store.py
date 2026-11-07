@@ -380,7 +380,8 @@ class JobStore:
                         dedupe_key=f"failed:{job.attempt + 1}:{error_code}", **kw)
         if post_error is not None:
             raise post_error
-        assert out is not None
+        if out is None:
+            raise RuntimeError("invariant violated: row missing after write")
         return out
 
     def get_job_result(self, task_id: str) -> dict[str, Any] | None:
@@ -754,7 +755,8 @@ class JobStore:
                 )
         if post_error is not None:
             raise post_error
-        assert result is not None
+        if result is None:
+            raise RuntimeError("invariant violated: row missing after write")
         return result
 
     def mark_needs_review(
@@ -885,7 +887,8 @@ class JobStore:
                 result = job
         if post_error is not None:
             raise post_error
-        assert result is not None
+        if result is None:
+            raise RuntimeError("invariant violated: row missing after write")
         return result
 
     def cancel(self, task_id: str) -> JobRecord:

@@ -19,7 +19,8 @@ STATUSES = ("ok", "not_ready", "absent", "unknown", "skipped")
 
 
 def _check(cid: str, status: str, detail: str, **data: Any) -> dict[str, Any]:
-    assert status in STATUSES
+    if status not in STATUSES:
+        raise ValueError("unknown doctor status")
     return {"id": cid, "status": status, "detail": detail, **data}
 
 

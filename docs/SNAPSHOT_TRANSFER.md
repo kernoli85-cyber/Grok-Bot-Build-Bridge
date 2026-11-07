@@ -139,3 +139,47 @@ private and `INCOMPLETE`. TTL cleanup is design only.
 
 Honest limits: in-place same-size modification with restored timestamps, and inode reuse after
 unlink+recreate, cannot be fully detected; a hostile same-user process is out of scope.
+
+## Status v0.23.0: real pipe integration between separate processes (still no CLI)
+
+- `send_report(report, fd, deadline_s=, cancel=)` and `receive_snapshot(fd, ..., deadline_s=, cancel=)`
+  use raw fds with `select()` slices (0.1 s): a stalled writer or reader hits `deadline_exceeded`,
+  a set `threading.Event` gives `cancelled`, and `BrokenPipe` becomes `peer_closed`. Writes are
+  chunked to `PIPE_BUF` so a blocking pipe can't stall past the deadline (a real bug found by
+  these tests). The pipe is never `fstat`ed or seeked; EOF means `read() == b""`. Deadline/cancel
+  on a non-fd stream is refused rather than silently ignored.
+- Memory: the reader holds at most `max_total_bytes` (default 2 MiB) in RAM; the receiver streams
+  in 64 KiB chunks straight to 0600 files. Every fd is closed on all paths (checked via `/proc/self/fd`).
+- `COMPLETE` is written only after every file hash, the stream hash and the trailing-EOF check pass.
+  Payload paths live under `files/`, so a manifest entry named `COMPLETE`/`INCOMPLETE` cannot
+  collide with the markers (tested).
+- Publication: the snapshot dir is a fresh random name created with exclusive `mkdir` (0700) in a
+  verified staging parent; an existing dir is never reused. Consumers must check `COMPLETE` and
+  ownership; another user cannot enter the 0700 dir, the SAME user can (out of scope).
+- Root: production uses `os.geteuid()`; the injectable `uid_provider` was removed from the public
+  API. Tests run as the real non-root user (box uid 1000, GitHub's `runner`) and skip under root.
+  Root refusal is tested by monkeypatching `os.geteuid` in-test only.
+- Source dirs owned by someone other than the caller/root, or writable by group/other, are refused
+  (`untrusted_dir`): another user could swap in their content under a trusted name.
+- Content: selected files are sent in full. The secret filter is name-based only and can't promise
+  that no secret is inside a file.
+- Crash (`os._exit`/SIGKILL): the leftover is 0700, keeps `INCOMPLETE`, and never `COMPLETE` (tested).
+  TTL cleanup is still design only.
+- Packaging: the installed wheel runs a reader child -> real pipe -> receiver child smoke offline,
+  and asserts that `uid_provider` is absent and root is refused.
+
+### Bandit review (v0.23.0)
+The 5 B101 `assert` invariants were replaced by explicit raises (asserts vanish under `-O`).
+What remains, reviewed:
+- B108 (9): fixed WSL argv strings for `mktemp -d` and a `find` check, a dry-run placeholder,
+  the `jobs-demo` default, and the receiver default `/tmp`, which is verified root-owned and
+  sticky, with a fresh exclusive 0700 dir inside it.
+- B404/B603 (4): `shell=False` argv execution, by design.
+- B110 (4): best-effort cleanup or close.
+- B105/B106: redaction constants, not secrets.
+- B311: deterministic retry jitter, not security.
+
+### Correction
+Earlier notes said a Windows handle-based reader "needs owner approval". That was wrong: designing
+and writing it in box code needs no new approval. Only installing or testing it on the user's
+host does.
