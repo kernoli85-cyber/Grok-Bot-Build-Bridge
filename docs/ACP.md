@@ -30,3 +30,11 @@ headless plan. Per policy it was not run against the real model.
 The ACP docs list `session/set_config_option` (model), `_meta` options and an agent profile.
 Whether any of these give equivalent enforcement (for example a profile with deny rules) is a
 follow-up to verify from the docs. Model support exists: `grok agent -m LM-Studio stdio`.
+
+## v0.27.0 — protection-equivalence check (observed 2026-11-07, Grok CLI 1.0.77)
+
+- Observed (host, help-only, no model call): `grok agent --deny MCPTool stdio --help` → `error: unexpected argument '--deny'`. `grok agent --help` lists no deny, sandbox, permission-mode, disallowed-tools or max-turns flags.
+- Documented (xai-grok-agent README): `--agent-profile` frontmatter `tools: []`, `disallowedTools`, `permissionMode: dontAsk`, `agentsMd`; unknown fields silently ignored. `GROK_SANDBOX` env selects the sandbox.
+- Not available for ACP without out-of-scope config writes: the deny-rule layer (global config, or project config that needs folder trust) and a turn cap.
+- Result: ACP is **not** protection-equivalent to the headless ask plan. Live ACP stays gated.
+- `acp_launch.build_acp_launch_plan()` builds the would-be argv and profile, parses the installed agent help, and sets `live_allowed=False` with gaps `deny_rule_layer`, `turn_cap`. It opens only when the help lists `--deny` and `--max-turns`, and then adds them. It has no CLI and never runs anything. Mock-tested only; there was no real ACP turn.
