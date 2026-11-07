@@ -1,4 +1,4 @@
 root:x:0:0:root:/root:/bin/bash
-okern:x:1000:1000:Oliver:/home/okern:/bin/bash
+gbbbdemo:x:1000:1000:Demo User:/home/gbbbdemo:/bin/bash
 nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
 bad user:x:1001:1001::/home/bad:/bin/bash

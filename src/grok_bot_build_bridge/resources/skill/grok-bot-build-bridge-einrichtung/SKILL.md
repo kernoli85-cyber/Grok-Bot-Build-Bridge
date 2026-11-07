@@ -41,6 +41,10 @@ description: Use when setting up Grok Bot-Build Bridge via existing Grok Bot reg
 - `onboard`, `discover`, `prefs-show` / `prefs-save`
 - Webhook pump remains separate (`outbox-pump` dry-run default)
 
+## Text ask from the Windows desktop (no Windows install)
+
+Install the wheel into a venv **inside the already running WSL distro**. Do not put the package on the Windows `PATH`, do not start a login shell, and do not change Grok config. From the desktop Shell, after approval, run a fixed `wsl.exe --exec` of `<venv>/bin/grok-bot-build-bridge invoke` and pass one JSON object on stdin. Contract: `docs/INVOKE.md`. The source directory must already be on the POSIX filesystem. This recipe does not read Windows paths. No listener, port, Tailscale, or extra account.
+
 ## Out of scope
 
 - Marketplace / Connect-app publication, AddMcpServer registration, merge/release

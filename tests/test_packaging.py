@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.privacy_scan import scan_tar, scan_zip
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Subcommands that must work from an installed wheel (no checkout cwd)
@@ -23,11 +25,12 @@ _SMOKE_CMDS = [
 ]
 
 
-def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None, input: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         cwd=cwd,
         env=env,
+        input=input,
         text=True,
         capture_output=True,
         check=False,
@@ -54,6 +57,12 @@ def built_artifacts(tmp_path_factory) -> tuple[Path, Path]:
     assert wheels, "wheel missing"
     assert sdists, "sdist missing"
     return wheels[0], sdists[0]
+
+
+def test_built_packages_privacy_categories(built_artifacts):
+    wheel, sdist = built_artifacts
+    hits = scan_zip(wheel) + scan_tar(sdist)
+    assert hits == [], "package privacy categories: " + ", ".join(hits)
 
 
 def test_wheel_name_is_py3_none_any(built_artifacts):
@@ -244,7 +253,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
                "LOCALAPPDATA": str(xdg / "l")}
     ask_db = tmp_path / "ask" / "never.db"
     r = _run([str(exe), "ask", "--prompt", 'Sag "Hallo" \u00fc SECRETP', "--wsl-distro", "Ubuntu",
-              "--wsl-user", "okern", "--executable", "/usr/bin/grok", "--state-db", str(ask_db)], cwd=work, env=ask_env)
+              "--wsl-user", "gbbbdemo", "--executable", "/usr/bin/grok", "--state-db", str(ask_db)], cwd=work, env=ask_env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads(r.stdout)["state_written"] is False and "SECRETP" not in r.stdout
     assert not ask_db.exists() and not xdg.exists()
@@ -263,7 +272,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     r = cli("model-settings", "--settings", str(ms), "add-alias", "LM-Studio", "--expect-usage-key", "fake-local-model")
     assert r.returncode == 0, r.stdout + r.stderr
     assert cli("model-settings", "--settings", str(ms), "set-preferred", "LM-Studio").returncode == 0
-    r = cli("ask", "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok",
+    r = cli("ask", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo", "--executable", "/usr/bin/grok",
             "--prompt", "hi", "--model-settings", str(ms))
     d = json.loads(r.stdout)
     assert r.returncode == 0 and d["dry_run"] is True and d["limits"]["model"]["source"] == "owner_preference"
@@ -290,7 +299,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     if os.name == "posix" and not (hasattr(os, "geteuid") and os.geteuid() == 0):
         assert r.returncode == 0 and d["model_call"] is False and "47113" not in r.stdout, r.stdout
         assert json.loads(cli(*cargs).stdout)["consent_token"] == d["consent_token"]
-        r = cli(*cargs, "--wsl-user", "okern")
+        r = cli(*cargs, "--wsl-user", "gbbbdemo")
         assert json.loads(r.stdout)["error"]["code"] == "backend_args_conflict"
         r = cli(*cargs, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
         assert json.loads(r.stdout)["error"]["code"] == "executable_missing"
@@ -311,6 +320,42 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert res["cwd_cleanup"] == "removed" and res["cost_status"] == "unknown"
     elif os.name != "posix":
         assert r.returncode == 2 and d["error"]["code"] == "posix_source_only"
+    inv_env = {k: v for k, v in env.items() if k not in {"LOCALAPPDATA", "XDG_CONFIG_HOME", "HOME"}}
+    inv_env["LOCALAPPDATA"] = str(tmp_path / "inv-local")
+    inv_env["XDG_CONFIG_HOME"] = str(tmp_path / "inv-config")
+    inv_env["HOME"] = str(tmp_path / "inv-home")
+    inv_grok = tmp_path / "inv-grok" / "grok"
+    if os.name == "posix":
+        inv_grok.parent.mkdir(mode=0o755)
+        inv_grok.write_text(
+            "#!" + sys.executable + "\nimport json, os, sys\n"
+            "assert '--sandbox' in sys.argv and 'MCPTool' in sys.argv and os.listdir('.') == []\n"
+            "print(json.dumps({'text': 'ok', 'stopReason': 'end_turn', 'num_turns': 1, "
+            "'usage': {'input_tokens': 1, 'output_tokens': 1}, "
+            "'modelUsage': {'provider-model-id': {}}}))\n")
+        inv_grok.chmod(0o755)
+        invoke_executable = str(inv_grok)
+    else:
+        invoke_executable = "/usr/bin/grok"
+    ask_envlp = {
+        "schema": "gbbb.invoke/v1", "op": "ask", "executable": invoke_executable,
+        "model": {"id": "LM-Studio", "kind": "custom_local", "expect_usage_keys": ["provider-model-id"]},
+        "prompt": "PROMPTTOKEN ready",
+    }
+    r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(ask_envlp))
+    if os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        assert not (tmp_path / "inv-config").exists()
+    else:
+        d = json.loads(r.stdout)
+        assert r.returncode == 0 and d["mode"] == "dry_run" and d["model_call"] is False
+        assert "PROMPTTOKEN" not in r.stdout, r.stdout
+        sent = dict(ask_envlp, execute=True, allow_model_call=True, confirm_send=d["consent_token"])
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(sent))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["stored"] is False, r.stdout
+        assert body["result"]["status"] == "succeeded" and body["result"]["model_identity"] == "confirmed"
+        assert "PROMPTTOKEN" not in r.stdout and "sessionId" not in r.stdout
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

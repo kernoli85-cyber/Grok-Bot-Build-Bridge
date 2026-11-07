@@ -19,6 +19,7 @@ Discovery matrix: `none` | `native_only` | `wsl_only` | `both`. Root-default WSL
 - Pure Python **discovery parsing** (fixtures; no host mutation)
 - **Per-job routing** with path validation and **no silent fallback**
 - CLI: `version`, `discover`, `onboard`, `onboard-view`, `prefs-show`/`prefs-save` (live read-only probes), `discover-demo`, `plan-demo` (no installers; demos do not exec `grok` jobs)
+- `invoke`: one JSON object on stdin for a text prompt or a bounded file selection, run inside WSL. See `docs/INVOKE.md`. Windows does not install the package.
 - Legacy notify scripts under `legacy/notify/` (HTTPS webhook helper prototype)
 - Argv-only subprocess boundary (`safe_exec`) with timeouts; stopped WSL distros never auto-started
 - Deterministic unit tests with mocked subprocess (no network, no paid API)

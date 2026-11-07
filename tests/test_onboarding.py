@@ -22,7 +22,7 @@ FIX = Path(__file__).parent / "fixtures"
 
 def _wsl_ready():
     return nonroot_ready(
-        "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
 
 
@@ -93,7 +93,7 @@ def test_matrix_both_desired_both_ready_still_needs_default_choice():
 
 def test_stopped_distro_never_autostart_hint():
     stopped = nonroot_ready(
-        "Ubuntu", "okern", 1000, "Stopped", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Stopped", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
     report = classify_discovery(
         native_path=None, native_version_text=None, wsl_candidates=(stopped,)

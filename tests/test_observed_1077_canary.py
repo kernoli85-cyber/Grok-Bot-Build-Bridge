@@ -29,7 +29,7 @@ def test_every_tool_offered_in_canary_run_is_now_disallowed():
 
 
 def test_ask_and_smoke_plans_carry_extended_denylist():
-    p = P.build_wsl_grok_ask_plan(task_id="t", distro="Ubuntu", user="okern", grok_path="/usr/bin/grok",
+    p = P.build_wsl_grok_ask_plan(task_id="t", distro="Ubuntu", user="gbbbdemo", grok_path="/usr/bin/grok",
                                   cwd="/tmp/gbbb-ask-MockDir0001", prompt="x")
     v = p.argv[p.argv.index("--disallowed-tools") + 1]
     for t in ("use_tool", "search_tool", "write", "image_gen", "workflow"):

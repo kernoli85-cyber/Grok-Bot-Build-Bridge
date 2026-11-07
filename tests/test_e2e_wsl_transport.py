@@ -32,8 +32,8 @@ STOPPED = "  NAME      STATE           VERSION\n* Ubuntu    Stopped         2\n"
 
 def _report():
     cand = nonroot_ready(
-        distro="Ubuntu", user="okern", uid=1000, distro_state="Running",
-        grok_path="/home/okern/.local/bin/grok",
+        distro="Ubuntu", user="gbbbdemo", uid=1000, distro_state="Running",
+        grok_path="/home/gbbbdemo/.local/bin/grok",
         version_text="grok 1.0.70 (f50904eaee6c) [stable]",
     )
     return classify_discovery(
@@ -45,7 +45,7 @@ def _report():
 def test_full_chain_discovery_to_outbox_dry_run(tmp_path):
     report = _report()
     assert report.kind == "wsl_only"
-    jp = plan_job(report, JobRequest(task_id="e2e-1", prompt="noop", cwd="/home/okern", backend="wsl"))
+    jp = plan_job(report, JobRequest(task_id="e2e-1", prompt="noop", cwd="/home/gbbbdemo", backend="wsl"))
     assert jp.backend == "wsl"
     cand = report.wsl[0]
     plan = build_wsl_probe_plan(task_id="e2e-1", distro=cand.distro, user=cand.user, cwd=jp.cwd)
@@ -58,7 +58,7 @@ def test_full_chain_discovery_to_outbox_dry_run(tmp_path):
 
     store = JobStore(tmp_path / "s.db")
     out = execute_one_shot(store, plan, owner="w", dry_run=False, executor=fake_exec)
-    assert seen["argv"][:8] == ("wsl.exe", "-d", "Ubuntu", "-u", "okern", "--cd", "/home/okern", "--exec")
+    assert seen["argv"][:8] == ("wsl.exe", "-d", "Ubuntu", "-u", "gbbbdemo", "--cd", "/home/gbbbdemo", "--exec")
     assert seen["argv"][8] == "/usr/bin/printf"
     assert out.status == "succeeded"
     assert (out.plan_backend, out.execution_transport, out.execution_kind) == ("wsl", "wsl_exe", "wsl_printf_probe")
@@ -73,7 +73,7 @@ def test_probe_refuses_root_unsafe_and_relative():
         build_wsl_probe_plan(task_id="t", distro="Ubuntu", user="root", cwd="/tmp")
     assert e.value.code == "wsl_root_refused"
     for kw in ({"distro": "My Distro"}, {"user": "a;b"}, {"cwd": "relative"}, {"cwd": "/a/../b"}):
-        args = {"task_id": "t", "distro": "Ubuntu", "user": "okern", "cwd": "/tmp", **kw}
+        args = {"task_id": "t", "distro": "Ubuntu", "user": "gbbbdemo", "cwd": "/tmp", **kw}
         with pytest.raises(PlanError):
             build_wsl_probe_plan(**args)
 
@@ -109,7 +109,7 @@ def test_windows_wsl_grok_direct_spawn_refused(tmp_path):
 
 def test_cli_probe_dry_run_and_stopped_refusal(tmp_path, capsys, monkeypatch):
     base = ["runner-run", "--state-db", str(tmp_path / "c.db"), "--task-id", "c1",
-            "--cwd", "/home/okern", "--wsl-probe", "--wsl-distro", "Ubuntu", "--wsl-user", "okern"]
+            "--cwd", "/home/gbbbdemo", "--wsl-probe", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo"]
     called = []
     monkeypatch.setattr(cli, "_wsl_list_reader", lambda: (called.append(1), (STOPPED, None))[1])
     assert cli.main(base) == 0

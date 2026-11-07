@@ -85,12 +85,14 @@ def handle_runtime_info() -> dict[str, Any]:
 
 def _fixture_report():
     wsl_list = fixture_text("wsl_list_v_running.txt")
+    from ..demo_facts import DEMO_GROK, DEMO_USER
+
     cand = nonroot_ready(
         distro="Ubuntu",
-        user="okern",
+        user=DEMO_USER,
         uid=1000,
         distro_state="Running",
-        grok_path="/home/okern/.local/bin/grok",
+        grok_path=DEMO_GROK,
         version_text="grok 1.0.70 (f50904eaee6c) [stable]",
     )
     return classify_discovery(

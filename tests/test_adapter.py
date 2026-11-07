@@ -38,7 +38,7 @@ def test_parse_native_rejects_metachar_source():
 
 def test_parse_passwd_skips_root_nobody_unsafe():
     users = parse_passwd_nonroot((FIX / "passwd_sample.txt").read_text())
-    assert users == [("okern", 1000, "/home/okern")]
+    assert users == [("gbbbdemo", 1000, "/home/gbbbdemo")]
 
 
 def test_native_only_matrix():
@@ -75,7 +75,7 @@ def test_wsl_only_running_nonroot():
             return _res(
                 argv,
                 0,
-                "/home/okern/.local/bin/grok\ngrok 1.0.70 (deadbeef) [stable]\n",
+                "/home/gbbbdemo/.local/bin/grok\ngrok 1.0.70 (deadbeef) [stable]\n",
             )
         return _res(argv, error="executable_not_found")
 
@@ -84,7 +84,7 @@ def test_wsl_only_running_nonroot():
     assert report.default_backend == "wsl"
     ready = [c for c in report.wsl if c.state == BackendState.READY]
     assert len(ready) == 1
-    assert ready[0].user == "okern"
+    assert ready[0].user == "gbbbdemo"
     assert ready[0].version == "1.0.70"
 
 
@@ -118,7 +118,7 @@ def test_both_backends():
         if "getent" in argv:
             return _res(argv, 0, (FIX / "passwd_sample.txt").read_text())
         if "bash" in argv:
-            return _res(argv, 0, "/home/okern/.local/bin/grok\ngrok 1.0.70\n")
+            return _res(argv, 0, "/home/gbbbdemo/.local/bin/grok\ngrok 1.0.70\n")
         return _res(argv, error="executable_not_found")
 
     report, _ = discover_host(runner=runner)
@@ -172,7 +172,7 @@ def test_utf16_wsl_list_via_decode_path():
         if "getent" in argv:
             return _res(argv, 0, (FIX / "passwd_sample.txt").read_text())
         if "bash" in argv:
-            return _res(argv, 0, "/home/okern/.local/bin/grok\ngrok 1.0.70\n")
+            return _res(argv, 0, "/home/gbbbdemo/.local/bin/grok\ngrok 1.0.70\n")
         return _res(argv, error="executable_not_found")
 
     report, _ = discover_host(runner=runner)

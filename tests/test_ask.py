@@ -18,7 +18,7 @@ FIX = Path(__file__).parent / "fixtures"
 DUMMY = FIX / "bridge-dummy-grokjson.py"
 RUNNING = "  NAME      STATE           VERSION\n* Ubuntu    Running         2\n"
 CWD = "/tmp/gbbb-ask-MockDir0001"
-BASE = ["ask", "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok"]
+BASE = ["ask", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo", "--executable", "/usr/bin/grok"]
 
 
 def _mock_wsl(monkeypatch, *, verify_ok=True, mk=CWD):
@@ -88,7 +88,7 @@ def test_prompt_bytes_bad_utf8_and_multibyte_bound():
 
 
 def test_prompt_mentioning_flags_is_a_single_value():
-    pl = P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="okern", grok_path="/usr/bin/grok",
+    pl = P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="gbbbdemo", grok_path="/usr/bin/grok",
                                    cwd=CWD, prompt='Explain "--yolo; rm -rf /" and $(id)', max_turns=3)
     i = pl.argv.index("--single")
     assert pl.argv[i + 1] == 'Explain "--yolo; rm -rf /" and $(id)'
@@ -98,13 +98,13 @@ def test_prompt_mentioning_flags_is_a_single_value():
 
 
 @pytest.mark.parametrize("kw,code", [
-    (dict(cwd="/home/okern"), "ask_cwd_invalid"), (dict(cwd="/tmp/gbbb-ask-../x"), "ask_cwd_invalid"),
+    (dict(cwd="/home/gbbbdemo"), "ask_cwd_invalid"), (dict(cwd="/tmp/gbbb-ask-../x"), "ask_cwd_invalid"),
     (dict(cwd="/tmp/gbbb-smoke-abcdefgh"), "ask_cwd_invalid"), (dict(max_turns=0), "max_turns_invalid"),
     (dict(max_turns=11), "max_turns_invalid"), (dict(timeout_sec=601), "timeout_invalid"),
     (dict(user="root"), "wsl_root_refused"), (dict(grok_path="grok"), "grok_path_invalid"),
 ])
 def test_plan_rejects(kw, code):
-    base = dict(task_id="t", distro="Ubuntu", user="okern", grok_path="/usr/bin/grok", cwd=CWD, prompt="hi")
+    base = dict(task_id="t", distro="Ubuntu", user="gbbbdemo", grok_path="/usr/bin/grok", cwd=CWD, prompt="hi")
     base.update(kw)
     with pytest.raises(P.PlanError) as e:
         P.build_wsl_grok_ask_plan(**base)
@@ -171,14 +171,14 @@ def test_unsafe_cwd_refused_before_model(tmp_path, capsys, monkeypatch):
 
 
 def test_mktemp_output_injection_refused(tmp_path, capsys, monkeypatch):
-    _mock_wsl(monkeypatch, mk="/home/okern")
+    _mock_wsl(monkeypatch, mk="/home/gbbbdemo")
     assert cli.main(BASE + ["--prompt", "hi", "--execute", "--allow-model-call",
                             "--state-db", str(tmp_path / "s.db")]) == 2
     assert json.loads(capsys.readouterr().out)["error"]["code"] == "ask_cwd_invalid"
 
 
 def test_verify_argv_is_fixed_read_only():
-    a = P.build_wsl_verify_ask_cwd_argv("Ubuntu", "okern", CWD)
+    a = P.build_wsl_verify_ask_cwd_argv("Ubuntu", "gbbbdemo", CWD)
     assert a[a.index("--exec") + 1] == "/usr/bin/find" and "-delete" not in a and "-exec" not in a
     assert "-type" in a and "-empty" in a and "/022" in a
 

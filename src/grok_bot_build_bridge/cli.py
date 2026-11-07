@@ -73,16 +73,17 @@ def _report_to_dict(report: DiscoveryReport) -> dict:
 
 def cmd_discover_demo(_args: argparse.Namespace) -> int:
     """Deterministic demo using packaged fixtures - no host probing."""
+    from .demo_facts import DEMO_GROK, DEMO_USER
     from .resources import fixture_text
 
     wsl_list = fixture_text("wsl_list_v_running.txt")
-    # Simulate measured host: native absent, WSL okern ready
+    # Synthetic demo only: native absent, fictional WSL user ready
     cand = nonroot_ready(
         distro="Ubuntu",
-        user="okern",
+        user=DEMO_USER,
         uid=1000,
         distro_state="Running",
-        grok_path="/home/okern/.local/bin/grok",
+        grok_path=DEMO_GROK,
         version_text="grok 1.0.70 (f50904eaee6c) [stable]",
     )
     report = classify_discovery(
@@ -163,12 +164,14 @@ def cmd_plan_demo(_args: argparse.Namespace) -> int:
     from .models import JobRequest, RoutingError
     from .routing import plan_job
 
+    from .demo_facts import DEMO_GROK, DEMO_HOME, DEMO_USER
+
     cand = nonroot_ready(
         distro="Ubuntu",
-        user="okern",
+        user=DEMO_USER,
         uid=1000,
         distro_state="Running",
-        grok_path="/home/okern/.local/bin/grok",
+        grok_path=DEMO_GROK,
         version_text="grok 1.0.70 (f50904eaee6c) [stable]",
     )
     report = classify_discovery(
@@ -181,7 +184,7 @@ def cmd_plan_demo(_args: argparse.Namespace) -> int:
         JobRequest(
             task_id="demo-task",
             prompt="explain API in ./src (read-only)",
-            cwd="/home/okern/proj",
+            cwd=DEMO_HOME + "/proj",
             max_turns=3,
             deny_rules=("Bash(rm *)",),
         ),
@@ -1010,12 +1013,14 @@ def cmd_onboard(args: argparse.Namespace) -> int:
         from .resources import fixture_text
 
         wsl_list = fixture_text("wsl_list_v_running.txt")
+        from .demo_facts import DEMO_GROK, DEMO_USER
+
         cand = nonroot_ready(
             distro="Ubuntu",
-            user="okern",
+            user=DEMO_USER,
             uid=1000,
             distro_state="Running",
-            grok_path="/home/okern/.local/bin/grok",
+            grok_path=DEMO_GROK,
             version_text="grok 1.0.70 (f50904eaee6c) [stable]",
         )
         report = classify_discovery(
@@ -1413,7 +1418,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.set_defaults(func=cmd_ask)
 
     from .context_cli import add_parser as _ctx_add
+    from .invoke import cmd_invoke
+
     _ctx_add(sub)
+    sub.add_parser(
+        "invoke",
+        help="JSON stdin envelope: text ask or selected context inside POSIX/WSL (dry-run default)",
+    ).set_defaults(func=cmd_invoke)
 
     p_ms = sub.add_parser("model-settings", help="Owner's bridge model preference and aliases (local file only; no Grok call)")
     p_ms.add_argument("--settings", default=None, help="Path (default: user config dir model_settings.json)")

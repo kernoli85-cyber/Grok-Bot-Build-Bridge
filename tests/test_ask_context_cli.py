@@ -13,7 +13,7 @@ if os.name != "posix" or os.getuid() == 0:
 def _run(tmp_path, *extra, exe=None, source=None, files=("docs/notes.txt",), q="What is the port?", settings=None):
     base = [sys.executable, "-m", "grok_bot_build_bridge.cli", "ask-context",
             "--source", str(source or tmp_path / "src"), "--question", q,
-            "--executable", str(exe or "/home/okern/.local/bin/grok"),
+            "--executable", str(exe or "/home/gbbbdemo/.local/bin/grok"),
             "--model", "LM-Studio", "--model-settings", str(settings or tmp_path / "ms.json"),
             "--consent-key", str(tmp_path / "cfg" / "consent.key")]
     for f in files:
@@ -84,7 +84,7 @@ def test_execute_gates_before_anything_runs(setup):
 
 def test_wsl_backend_bound_separately_and_refused(setup):
     _, local = _run(setup)
-    w = ("--backend", "wsl-exe", "--wsl-distro", "Ubuntu", "--wsl-user", "okern")
+    w = ("--backend", "wsl-exe", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo")
     _, wsl = _run(setup, *w)
     assert wsl["consent_token"] != local["consent_token"]
     rc, e = _run(setup, *w, "--execute", "--allow-model-call", "--confirm-send", local["consent_token"])
@@ -120,7 +120,7 @@ def test_model_must_be_registered_with_identity(setup):
 
 
 def test_wsl_args_rejected_for_posix_local_before_any_write(setup):
-    rc, e = _run(setup, "--wsl-user", "okern")
+    rc, e = _run(setup, "--wsl-user", "gbbbdemo")
     assert rc == 2 and e["error"]["code"] == "backend_args_conflict"
     assert not (setup / "cfg").exists() and os.listdir(setup / "tmp") == []
 

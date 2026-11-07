@@ -1,20 +1,9 @@
 #!/usr/bin/env bash
-# Beispiel: von Windows aus (nicht ausführen ohne Freigabe).
-# WORK und PROMPT setzen. Kein --always-approve.
+# Synthetic example only. From a Windows shell, prefer the PowerShell form in docs/INVOKE.md.
+# This redirect does not expand the JSON file. No login shell, no bash -c, no flag splicing.
 set -euo pipefail
-WORK="${WORK:-/tmp/balu-grok-smoke}"
-PROMPT="${PROMPT:-Antworte ausschließlich mit OK.}"
-MAX_TURNS="${MAX_TURNS:-1}"
-
-wsl.exe -d Ubuntu -u okern -- bash -lic "
-  set -euo pipefail
-  mkdir -p \"$WORK\"
-  cd \"$WORK\"
-  grok --no-auto-update -p \"$PROMPT\" \\
-    --cwd \"$WORK\" \\
-    --output-format json \\
-    --max-turns $MAX_TURNS \\
-    --permission-mode plan \\
-    --deny Bash --deny Edit --deny Write \\
-    --disable-web-search --no-subagents
-"
+DISTRO="${DISTRO:-Ubuntu}"
+USER_NAME="${USER_NAME:-gbbbdemo}"
+COMPANION="${COMPANION:-/home/gbbbdemo/.venv/bin/grok-bot-build-bridge}"
+ENVELOPE="${ENVELOPE:-examples/invoke-envelope.example.json}"
+exec wsl.exe -d "$DISTRO" -u "$USER_NAME" --exec "$COMPANION" invoke < "$ENVELOPE"
