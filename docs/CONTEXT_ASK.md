@@ -13,7 +13,7 @@
 
 The model **cannot read the snapshot**; it sees only the packed text. Windows-source repos stay fail-closed (no Windows reader).
 
-## Live observation (2026-11-07 ~13:35–13:40 CET, 3 prompts, `--model LM-Studio`)
+## Live observation (2026-11-07 ~13:30–13:35 CET, 3 prompts, `--model LM-Studio`)
 Synthetic fixtures went through the real reader, pipe, receiver and pack on the box. Each prompt was transferred byte-exactly to the host: a separate non-model `printf` check matched the fingerprint. Each prompt ran once on the host Grok 1.0.77 with the unchanged protected argv and a fresh verified `/tmp/gbbb-ask-*` dir, which was removed afterwards.
 
 | # | test | answer | stop | key | time |
