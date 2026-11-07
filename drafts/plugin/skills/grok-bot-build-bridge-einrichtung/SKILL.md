@@ -43,7 +43,7 @@ description: Use when setting up Grok Bot-Build Bridge via existing Grok Bot reg
 
 ## Text ask from the Windows desktop (no Windows install)
 
-Install the wheel into a venv **inside the already running WSL distro**. Do not put the package on the Windows `PATH`, do not start a login shell, and do not change Grok config. From the desktop Shell, after approval, run a fixed `wsl.exe --exec` of `<venv>/bin/grok-bot-build-bridge invoke` and pass one JSON object on stdin. Contract: `docs/INVOKE.md`. The source directory must already be on the POSIX filesystem. This recipe does not read Windows paths. No listener, port, Tailscale, or extra account.
+Install the wheel into a venv **inside the already running WSL distro**. Do not put the package on the Windows `PATH`, do not start a login shell, and do not change Grok config. From the desktop Shell, after approval, run a fixed `wsl.exe --exec` of `<venv>/bin/grok-bot-build-bridge invoke` and pass one JSON object on stdin. Contract: `docs/INVOKE.md`. The source directory must already be on the POSIX filesystem. This recipe does not read Windows paths. No listener, port, Tailscale, or extra account. `op: propose` returns a review diff only; it does not modify the selected files or apply a patch.
 
 ## Out of scope
 

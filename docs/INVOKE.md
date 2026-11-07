@@ -1,6 +1,6 @@
 # Invoke from a Windows desktop through WSL
 
-`grok-bot-build-bridge invoke` is the supported way to run one text prompt, or one bounded selected-context prompt, on Grok Build **inside an already running WSL distro**.
+`grok-bot-build-bridge invoke` is the supported way to run one text prompt, one bounded selected-context prompt, or one **review-only file proposal** on Grok Build **inside an already running WSL distro**.
 
 Windows does not install the package, does not change `PATH`, and does not start a login shell. Nothing listens on a port. No Tailscale account and no Grok config edit is required. ACP stays gated. A Windows source tree is not read; files must already be on the POSIX filesystem.
 
@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.31.0-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.0-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -63,13 +63,35 @@ A real call repeats that object with `"execute": true`, `"allow_model_call": tru
 
 Success requires Grok's `modelUsage` keys to be within the declared id and `expect_usage_keys`. Otherwise the status is `needs_review` and nothing is run again.
 
+## Proposal (`op: propose`) — does not edit files
+
+`propose` asks the same protected no-tools runner for a full-file replacement of the explicitly selected POSIX text files. The instruction is plain text, like a question. It cannot add paths, flags, or commands.
+
+The model text is untrusted. The bridge accepts it only when it is exactly one JSON object, schema `gbbb.file_replacements/v1`, with each selected path once and no others. Markdown fences, a second JSON value, a wrong path, control characters, or an oversize file reject the proposal. A proposal that matches the current bytes is `changed: false`.
+
+Nothing in this response writes the source tree, commits, or applies the edit. `show_proposal: true` (execute only) adds a transient unified diff for review. `show_answer` is not this operation and is not permission to apply. `proposal_token` binds the selection order, the base bytes, and the proposed bytes. The bridge does not store the proposal. The token is not an apply step. There is no apply command in this version.
+
+```json
+{
+  "schema": "gbbb.invoke/v1",
+  "op": "propose",
+  "executable": "/home/gbbbdemo/.local/bin/grok",
+  "model": {"id": "LM-Studio", "kind": "custom_local", "expect_usage_keys": ["provider-model-id"]},
+  "source": "/home/gbbbdemo/work",
+  "files": ["notes/a.txt"],
+  "instruction": "Replace the word alpha with beta."
+}
+```
+
+Dry-run fields include `proposal_only: true`, `applied: false`, and `source_writes: false`. Execute repeats the object with `execute`, `allow_model_call`, and `confirm_send`. If the files change after the dry-run, the token does not match. If they change during the call, the proposal is rejected with `source_changed` and the source is left as it was. A model-identity mismatch or a cleanup failure does not produce a proposal.
+
 Tools stay denied, the sandbox stays strict, and the working directory is a fresh `/tmp/gbbb-ask-<hex>` directory that is removed if empty. A guest timeout is not a retry.
 
 ## Limits
 
-- Not a coding agent and not a marketplace app.
-- POSIX source only.
-- `setsid` can leave the process group; that is reported as not fully cleaned up, never as success.
+- Not a coding agent and not a marketplace app. A proposal is review material. The selected files stay as they were.
+- POSIX source only. Windows paths are not read.
+- `setsid` can leave the process group; that is reported as not fully cleaned up, never as success, and it does not yield an accepted proposal.
 - The prompt is visible to the OS process list while grok runs, because grok takes it as an argument.
 - Side-model calls are not fully switchable.
-- The consent key is the only file this command creates.
+- The bridge's durable write is the consent key under the user config directory. It also creates a short-lived staging directory and, on execute, a fresh `/tmp/gbbb-ask-<hex>` directory, which it removes if empty. Grok itself may still create session or temp files under the user home. The bridge does not delete those.

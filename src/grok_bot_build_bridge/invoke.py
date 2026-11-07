@@ -17,13 +17,14 @@ from typing import Any
 
 SCHEMA = "gbbb.invoke/v1"
 MAX_ENVELOPE_BYTES = 16 * 1024
-_OPS = frozenset({"ask", "ask-context"})
+_OPS = frozenset({"ask", "ask-context", "propose"})
 _COMMON = frozenset({
     "schema", "op", "executable", "model", "timeout_sec", "max_turns",
     "execute", "allow_model_call", "confirm_send", "show_answer",
 })
 _ASK = _COMMON | {"prompt"}
 _CONTEXT = _COMMON | {"source", "files", "question"}
+_PROPOSE = (_COMMON - {"show_answer"}) | {"source", "files", "instruction", "show_proposal"}
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
 _EXE_BAD = set(";&|$`<>(){}[]!*?~#\\\"'\n\r\t ")
 
@@ -75,8 +76,8 @@ def parse_envelope(raw: bytes) -> dict:
         raise InvokeError("schema_invalid", f"schema must be {SCHEMA}")
     op = obj.get("op")
     if op not in _OPS:
-        raise InvokeError("schema_invalid", "op must be ask or ask-context")
-    allowed = _ASK if op == "ask" else _CONTEXT
+        raise InvokeError("schema_invalid", "op must be ask, ask-context, or propose")
+    allowed = {"ask": _ASK, "ask-context": _CONTEXT, "propose": _PROPOSE}[op]
     if set(obj) - allowed:
         raise InvokeError("schema_invalid", "envelope has unknown fields")
     if not {"executable", "model"} <= set(obj):
@@ -85,6 +86,8 @@ def parse_envelope(raw: bytes) -> dict:
         raise InvokeError("schema_invalid", "ask requires prompt")
     if op == "ask-context" and not {"source", "files", "question"} <= set(obj):
         raise InvokeError("schema_invalid", "ask-context requires source, files, and question")
+    if op == "propose" and not {"source", "files", "instruction"} <= set(obj):
+        raise InvokeError("schema_invalid", "propose requires source, files, and instruction")
     return obj
 
 
@@ -145,11 +148,12 @@ def _checked(obj: dict) -> dict:
     """Schema checks that do not touch the filesystem."""
     execute = _bool(obj, "execute")
     allow = _bool(obj, "allow_model_call")
-    show = _bool(obj, "show_answer")
+    show = _bool(obj, "show_answer") if "show_answer" in obj or obj.get("op") != "propose" else False
+    show_proposal = _bool(obj, "show_proposal") if obj.get("op") == "propose" else False
     if "confirm_send" in obj and not isinstance(obj["confirm_send"], str):
         raise InvokeError("field_invalid", "confirm_send must be a string")
-    if not execute and (allow or show or "confirm_send" in obj):
-        raise InvokeError("field_invalid", "allow_model_call, show_answer, and confirm_send require execute")
+    if not execute and (allow or show or show_proposal or "confirm_send" in obj):
+        raise InvokeError("field_invalid", "allow_model_call, show_answer, show_proposal, and confirm_send require execute")
     if execute and not allow:
         raise InvokeError("model_call_gated", "real call requires allow_model_call")
     if execute and "confirm_send" not in obj:
@@ -158,7 +162,8 @@ def _checked(obj: dict) -> dict:
     executable = _executable(obj["executable"])
     timeout = _timeout(obj)
     choice = _model_choice(obj, timeout)
-    return {"execute": execute, "show": show, "executable": executable, "timeout": timeout, "choice": choice}
+    return {"execute": execute, "show": show, "show_proposal": show_proposal,
+            "executable": executable, "timeout": timeout, "choice": choice}
 
 
 def _shape(argv, prompt: str, placeholder: str) -> list[str]:
@@ -205,11 +210,31 @@ def _prepare(obj: dict, checked: dict) -> dict:
     selection: list[str] = []
     summary = None
     skipped = None
+    bases: list[tuple[str, str]] = []
     if obj["op"] == "ask":
         try:
             prompt = validate_ask_prompt(obj["prompt"])
         except PlanError as exc:
             raise InvokeError(exc.code, exc.message) from None
+    elif obj["op"] == "propose":
+        from .proposal import stage_proposal
+        source, files, instruction = obj["source"], obj["files"], obj["instruction"]
+        if not isinstance(source, str) or not isinstance(instruction, str) or not isinstance(files, list):
+            raise InvokeError("field_invalid", "source, files, and instruction have the wrong type")
+        if not all(isinstance(item, str) for item in files):
+            raise InvokeError("field_invalid", "files must be strings")
+        try:
+            packed, texts, skipped = stage_proposal(source, list(files), instruction, key)
+        except ContextError as exc:
+            raise InvokeError(exc.code, exc.message) from None
+        except SnapshotError as exc:
+            raise InvokeError(exc.code, exc.message) from None
+        except OSError:
+            raise InvokeError("io_error", "unexpected OSError (details withheld: may contain paths)") from None
+        prompt = packed.prompt
+        selection = list(files)
+        bases = texts
+        summary = packed.summary()
     else:
         source, files, question = obj["source"], obj["files"], obj["question"]
         if not isinstance(source, str) or not isinstance(question, str) or not isinstance(files, list):
@@ -238,7 +263,9 @@ def _prepare(obj: dict, checked: dict) -> dict:
     return {
         "prompt": prompt, "selection": selection, "choice": choice, "timeout": timeout,
         "executable": executable, "token": _token(key, prompt, binding), "key_created": key_created,
-        "summary": summary, "skipped": skipped, "plan": plan,
+        "summary": summary, "skipped": skipped, "plan": plan, "bases": bases, "key": key,
+        "source": obj.get("source"), "files": list(obj.get("files") or []),
+        "instruction": obj.get("instruction"),
     }
 
 
@@ -271,6 +298,10 @@ def run_invoke(raw: bytes) -> int:
             body["context"] = info["summary"]
             body["snapshot_skipped"] = info["skipped"]
             body["writes"]["staging_dir_removed"] = True
+        if obj["op"] == "propose":
+            body["applied"] = False
+            body["source_writes"] = False
+            body["proposal_only"] = True
         return _out(body, 0)
 
     from .context_cli import LOCAL_PLACEHOLDER_CWD
@@ -293,12 +324,35 @@ def run_invoke(raw: bytes) -> int:
     if _shape(real.argv, info["prompt"], cwd) != _shape(info["plan"].argv, info["prompt"], LOCAL_PLACEHOLDER_CWD):
         PL._cleanup_cwd(cwd)
         return _err("consent_mismatch", "launch argv differs from the confirmed plan")
-    res = PL.run_local(real, show_answer=checked["show"])
-    return _out({
+    res = PL.run_local(real, show_answer=checked["show"], capture_text=(obj["op"] == "propose"))
+    captured = res.pop("captured_text", None)
+    body = {
         "schema": SCHEMA, "mode": "execute", "op": obj["op"], "model_call": True,
         "stored": False, "db": False, "outbox": False, "mcp": False, "retry": False,
         "result": res,
-    }, 0 if res["status"] == "succeeded" else 3)
+    }
+    if obj["op"] != "propose":
+        return _out(body, 0 if res["status"] == "succeeded" else 3)
+    body["applied"] = False
+    body["source_writes"] = False
+    if res["status"] != "succeeded":
+        return _out(body, 3)
+    from .context_pack import ContextError
+    from .proposal import ProposalError, parse_replacements, review, stage_proposal
+    from .snapshot_posix import SnapshotError
+    try:
+        _packed, now, _skipped = stage_proposal(
+            info["source"], info["files"], info["instruction"], info["key"])
+        if list(now) != list(info["bases"]):
+            raise ProposalError("source_changed", "selected files changed during the call")
+        proposed = parse_replacements(captured or "", info["selection"])
+        body["proposal"] = review(
+            info["selection"], dict(info["bases"]), proposed, info["key"], show=checked["show_proposal"])
+    except (ProposalError, ContextError, SnapshotError) as exc:
+        body["proposal"] = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
+                            "source_writes": False, "stored": False, "error": exc.code}
+        return _out(body, 3)
+    return _out(body, 0)
 
 
 def cmd_invoke(_args) -> int:

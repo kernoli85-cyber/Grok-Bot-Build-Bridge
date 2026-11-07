@@ -269,6 +269,25 @@ ANSWER_MAX_CHARS = 16_000
 _ANSWER_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
+def result_text(stdout: str | bytes | None) -> str | None:
+    """Raw JSON text field for a caller that will validate it. Not for display or storage."""
+    if not stdout:
+        return None
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return None
+    try:
+        obj = json.loads(stdout.strip())
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+    text = obj.get("text")
+    return text if isinstance(text, str) else None
+
+
 def extract_answer_text(stdout: str | bytes | None, *, truncated: bool = False) -> tuple[str | None, bool]:
     """Transient, bounded answer text for opt-in console display. Never persisted.
 

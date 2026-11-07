@@ -346,6 +346,11 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     if os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0):
         assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
         assert not (tmp_path / "inv-config").exists()
+        prop = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": "/usr/bin/grok",
+                "model": ask_envlp["model"], "source": "/tmp/gbbb-src", "files": ["a.txt"],
+                "instruction": "No-op."}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
     else:
         d = json.loads(r.stdout)
         assert r.returncode == 0 and d["mode"] == "dry_run" and d["model_call"] is False
@@ -356,6 +361,34 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert r.returncode == 0 and body["stored"] is False, r.stdout
         assert body["result"]["status"] == "succeeded" and body["result"]["model_identity"] == "confirmed"
         assert "PROMPTTOKEN" not in r.stdout and "sessionId" not in r.stdout
+        psrc = tmp_path / "psrc"
+        (psrc / "notes").mkdir(parents=True)
+        os.chmod(psrc, 0o755)
+        os.chmod(psrc / "notes", 0o755)
+        pfile = psrc / "notes" / "a.txt"
+        pfile.write_text("alpha\n")
+        before = pfile.read_bytes()
+        prop_dummy = tmp_path / "prop-bin" / "grok"
+        prop_dummy.parent.mkdir(mode=0o755)
+        replacement = json.dumps({"schema": "gbbb.file_replacements/v1",
+                                  "files": [{"path": "notes/a.txt", "content": "beta\n"}]})
+        grok_out = {"text": replacement, "stopReason": "end_turn", "num_turns": 1,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "modelUsage": {"provider-model-id": {}}}
+        prop_dummy.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
+                              "assert '--sandbox' in sys.argv and os.listdir('.') == []\n"
+                              "print(json.dumps(" + json.dumps(grok_out) + "))\n")
+        prop_dummy.chmod(0o755)
+        prop = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(prop_dummy),
+                "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/a.txt"],
+                "instruction": "Use beta."}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        tok = json.loads(r.stdout)["consent_token"]
+        prop.update(execute=True, allow_model_call=True, confirm_send=tok, show_proposal=True)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["proposal"]["applied"] is False and body["source_writes"] is False
+        assert body["proposal"]["changed"] is True and pfile.read_bytes() == before
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

@@ -165,7 +165,7 @@ def _kill_group(pgid: int) -> str:
         return "unproven"
 
 
-def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
+def run_local(plan: LocalPlan, *, show_answer: bool = False, capture_text: bool = False) -> dict:
     """Run once. Never retries. Returns a redacted status dict (no prompt/paths/session)."""
     require_posix_nonroot()
     p = subprocess.Popen(list(plan.argv), cwd=plan.cwd, env=_minimal_env(), stdin=subprocess.DEVNULL,
@@ -227,6 +227,11 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
         text, cut = extract_answer_text(stdout, truncated=truncated)
         res["answer"] = text
         res["answer_cut"] = cut
+    if capture_text and summary.parse_status == "ok":
+        from .grok_result import result_text
+        raw = result_text(stdout)
+        if raw is not None:
+            res["captured_text"] = raw
     return res
 
 
