@@ -196,6 +196,8 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
         cleanup = "unproven"
     for t in ts:
         t.join(timeout=2)
+    if any(t.is_alive() for t in ts):
+        cleanup = "unproven"  # a descendant outside the group still holds our pipes (daemon reader left)
     rc = p.returncode
     truncated = bool(o_cut)
     stdout = b"".join(out)
@@ -209,6 +211,8 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
     else:
         code = classify(summary, require_expected=False)
         status = "succeeded" if code is None else "needs_review"
+    if status != "failed" and cleanup == "unproven":
+        status, code = "needs_review", "cleanup_unproven"
     if status == "succeeded" and cleanup != "group_empty":
         status, code = "needs_review", "cleanup_unproven"
     cwd_state = _cleanup_cwd(plan.cwd)

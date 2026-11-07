@@ -32,6 +32,13 @@ if mode == "flood":
     sys.stdout.write("x" * 200000); sys.exit(0)
 if mode == "litter":
     open("left.txt", "w").write("x")
+if mode == "escape":
+    import subprocess
+    subprocess.Popen(["/bin/sleep", "6"], start_new_session=True)
+if mode == "bidi":
+    print(json.dumps({{"text": "a\u202eb\x1b[2Jc", "stopReason": "end_turn", "num_turns": 1,
+                      "usage": {{"input_tokens": 1, "output_tokens": 1}}, "modelUsage": {{"qwen3.5-9b-mtp": {{}}}}}}))
+    sys.exit(0)
 if mode == "child":
     import subprocess
     subprocess.Popen(["/bin/sleep", "30"])
@@ -149,3 +156,49 @@ def test_local_argv_is_exact_guest_part_of_wsl_plan():
     w = build_wsl_grok_ask_plan(task_id="x", distro="Ubuntu", user="u", grok_path="/opt/grok", cwd=cwd,
                                 prompt="hi", timeout_sec=60, model=m)
     assert lp.argv == w.argv[w.argv.index("--exec") + 1:] and "wsl.exe" not in lp.argv
+
+
+def test_setsid_escapee_holding_pipe_is_never_success(dummy):
+    setup, exe = dummy
+    rc, r, new = _exec(setup, exe, "escape")
+    res = r["result"]
+    assert res["status"] == "needs_review" and res["error_code"] == "cleanup_unproven"
+    assert res["process_cleanup"] == "unproven"
+
+
+def test_answer_controls_and_bidi_neutralised(dummy):
+    setup, exe = dummy
+    rc, r, _ = _exec(setup, exe, "bidi", "--show-answer")
+    ans = r["result"]["answer"]
+    assert "\u202e" not in ans and "\x1b" not in ans and ans.startswith("a")
+
+
+def test_symlink_target_swap_invalidates_consent(dummy):
+    setup, exe = dummy
+    (exe.parent / "mode").write_text("ok")
+    ld = exe.parent.parent / "lbin"
+    ld.mkdir(mode=0o755)
+    link = ld / "grok"
+    os.symlink(exe, link)
+    rc0, d = _run(setup, exe=link)
+    assert rc0 == 0, d
+    other = exe.parent / "grok2"
+    other.write_text(exe.read_text())
+    other.chmod(0o755)
+    os.unlink(link)
+    os.symlink(other, link)
+    rc, e = _run(setup, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"], exe=link)
+    assert e["error"]["code"] == "consent_mismatch"
+
+
+def test_optimized_mode_keeps_gates(dummy):
+    setup, exe = dummy
+    os.environ["PYTHONOPTIMIZE"] = "2"
+    try:
+        rc, r, new = _exec(setup, exe, "ok")
+        assert r["result"]["status"] == "succeeded"
+        _, d = _run(setup, exe=exe)
+        rc, e = _run(setup, "--execute", "--allow-model-call", "--confirm-send", "0" * 32, exe=exe)
+        assert e["error"]["code"] == "consent_mismatch"
+    finally:
+        del os.environ["PYTHONOPTIMIZE"]

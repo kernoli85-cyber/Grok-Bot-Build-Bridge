@@ -117,3 +117,43 @@ def test_unsafe_selection_and_skipped_files(setup):
 def test_model_must_be_registered_with_identity(setup):
     rc, e = _run(setup, "--model", "Unknown-Model")
     assert rc == 2 and e["error"]["code"] in ("model_identity_required",)
+
+
+def test_wsl_args_rejected_for_posix_local_before_any_write(setup):
+    rc, e = _run(setup, "--wsl-user", "okern")
+    assert rc == 2 and e["error"]["code"] == "backend_args_conflict"
+    assert not (setup / "cfg").exists() and os.listdir(setup / "tmp") == []
+
+
+def test_errors_never_echo_paths_names_or_question(setup):
+    secret_q = "Question-SECRET-xyz?"
+    cases = [dict(source=setup / "nope-SECRET-dir"), dict(files=("missing-SECRET.txt",)),
+             dict(files=("../SECRET",))]
+    for kw in cases:
+        rc, e = _run(setup, q=secret_q, **kw)
+        blob = json.dumps(e)
+        assert rc == 2 and "SECRET" not in blob and str(setup) not in blob, blob
+
+
+def test_key_dir_symlink_and_loose_perms_refused_not_fixed(setup):
+    real = setup / "realcfg"
+    real.mkdir(mode=0o700)
+    os.symlink(real, setup / "cfg")
+    rc, e = _run(setup)
+    assert e["error"]["code"] == "consent_key_invalid" and os.listdir(real) == []
+    os.unlink(setup / "cfg")
+    (setup / "cfg").mkdir(mode=0o777)
+    os.chmod(setup / "cfg", 0o777)
+    rc, e = _run(setup)
+    assert e["error"]["code"] == "consent_key_invalid"
+    assert oct(os.stat(setup / "cfg").st_mode & 0o777) == "0o777"  # not silently "fixed"
+
+
+def test_concurrent_planners_share_one_key(setup):
+    import concurrent.futures as cf
+    with cf.ThreadPoolExecutor(6) as ex:
+        outs = list(ex.map(lambda _: _run(setup), range(6)))
+    toks = {o[1].get("consent_token") for o in outs if o[0] == 0}
+    created = sum(1 for o in outs if o[0] == 0 and o[1]["writes"]["consent_key_created"])
+    assert len(toks) == 1 and created <= 1
+    assert all(o[0] == 0 or o[1]["error"]["code"] == "consent_key_invalid" for o in outs)

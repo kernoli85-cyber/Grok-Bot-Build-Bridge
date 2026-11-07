@@ -85,6 +85,8 @@ def cmd_ask_context(args) -> int:
     if os.name != "posix" or sys.platform == "win32":
         return _err("posix_source_only", "ask-context reads sources only on POSIX (e.g. inside WSL); "
                     "Windows-side sources fail closed (no Windows reader)")
+    if args.backend == "posix-local" and (args.wsl_distro or args.wsl_user):
+        return _err("backend_args_conflict", "--wsl-distro/--wsl-user apply only to --backend wsl-exe")
     if args.execute and not args.allow_model_call:
         return _err("model_call_gated", "real call requires --allow-model-call")
     if args.execute and not args.confirm_send:
@@ -108,6 +110,8 @@ def cmd_ask_context(args) -> int:
         return _err(exc.code, exc.message, **exc.info)
     except SnapshotError as exc:
         return _err(exc.code, exc.message)
+    except OSError as exc:
+        return _err("io_error", f"unexpected {type(exc).__name__} (details withheld: may contain paths)")
     staging_removed = getattr(_stage_and_pack, "last_removed", False)
     from .runner import posix_local as PL
     backend = args.backend
@@ -133,7 +137,9 @@ def cmd_ask_context(args) -> int:
     def _shape(av, ph):
         return [("<PROMPT>" if a == packed.prompt else "<CWD>" if a == ph else a) for a in av]
     shape = _shape(argv, placeholder)
-    binding = {"backend": backend, **target, "executable": args.executable, "model_id": choice.model_id,
+    binding = {"backend": backend, **target, "executable": args.executable,
+               "executable_realpath": os.path.realpath(args.executable), "model_id": choice.model_id,
+               "model_kind": choice.kind, "model_source": choice.source,
                "expect_usage_keys": list(choice.expect_usage_keys), "max_turns": args.max_turns,
                "timeout_sec": timeout, "selection": list(args.file),
                "argv_shape_sha256": hashlib.sha256(json.dumps(shape).encode()).hexdigest()}

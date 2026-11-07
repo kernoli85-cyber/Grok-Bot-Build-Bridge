@@ -283,13 +283,15 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     if os.name == "posix":
         csrc.chmod(0o755)
     cargs = ("ask-context", "--source", str(csrc), "--file", "n.txt", "--question", "Port?",
-             "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok",
+             "--executable", "/usr/bin/grok",
              "--model", "LM-Studio", "--model-settings", str(ms), "--consent-key", str(tmp_path / "ck" / "consent.key"))
     r = cli(*cargs)
     d = json.loads(r.stdout)
     if os.name == "posix" and not (hasattr(os, "geteuid") and os.geteuid() == 0):
         assert r.returncode == 0 and d["model_call"] is False and "47113" not in r.stdout, r.stdout
         assert json.loads(cli(*cargs).stdout)["consent_token"] == d["consent_token"]
+        r = cli(*cargs, "--wsl-user", "okern")
+        assert json.loads(r.stdout)["error"]["code"] == "backend_args_conflict"
         r = cli(*cargs, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
         assert json.loads(r.stdout)["error"]["code"] == "executable_missing"
         # installed wheel + direct POSIX runner + dummy grok (prints a fixed JSON, no model)

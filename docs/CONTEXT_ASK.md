@@ -53,3 +53,25 @@ grok-bot-build-bridge ask-context --source DIR --file a.txt [--file b.txt] --que
 - **Tested.** With a dummy grok only: offline tests plus the installed wheel on Linux; Windows fails closed.
 - **Not tested.** No real grok and no model call in this phase.
 - **Not deployable yet.** Real use needs the companion installed inside WSL, which is a separate owner approval that has not been given. The host companion is still 0.16.2.
+
+## v0.30.1: security/correctness review of 0.30.0 (box only, no model or host calls)
+**Fixed, each with a regression test:**
+1. **Ignored WSL flags.** `--wsl-distro`/`--wsl-user` were silently ignored with `posix-local`. They are now rejected (`backend_args_conflict`) before any write: no key and no staging.
+2. **Symlink retargeting.** Retargeting a symlinked `--executable` kept the token valid. The token now also binds `realpath(executable)`, the model kind and the model source.
+3. **Escaped descendant.** A descendant that escaped via `setsid()` and kept our stdout open could still yield `succeeded`. A reader that is still alive after the join now forces `process_cleanup: unproven`, which means `needs_review` / `cleanup_unproven`. It is never success.
+4. **Raw OSError paths.** An unexpected `OSError` during planning now returns a redacted `io_error`, with no traceback or path.
+
+**Reviewed and tested, no change needed:**
+- **No leaks in errors.** Errors from a missing source, missing files or traversal echo no paths, file names or question (tested). argparse usage errors go to stderr and may echo the bad *argument value*, as standard argparse does.
+- **Answer display.** `--show-answer` replaces C0/C1 controls and bidi characters with U+FFFD (tested with `\u202e` and ESC).
+- **Overflow.** Stdout over 64 KiB means `output_truncated`, never success.
+- **Consent key.** A symlinked key directory or one writable by group/others is refused and **not chmod-"fixed"**. Six concurrent planners produce at most one creation and one shared key. A planner that hits the brief link window fails closed with `consent_key_invalid`; it never makes a second key. Ancestor directories above the key dir are not checked; the key protects consent integrity only against other users.
+- **`python -O`.** Gates and statuses hold under `PYTHONOPTIMIZE=2`; the new code has no `assert` in src. There are no public test hooks.
+- **Backend parity.** The local argv equals the guest part of the `wsl.exe` plan, and all `GROK_*` switches travel in argv via `/usr/bin/env`, so they are bound by the token.
+- **Environment.** The local runner passes only PATH=/usr/bin:/bin, LANG=C.UTF-8, HOME, USER and LOGNAME. HOME is needed for grok's own auth/config (grok reads it; the bridge does not). Other variables (e.g. `XDG_*`, proxy, `LD_*`, API keys) are **not** inherited. A grok setup that depends on them needs an explicit future option. The `wsl.exe` path gets the distro's login environment instead, so the two environments are not byte-identical.
+- **Bandit** on the 3 new modules found 6 issues, all reviewed:
+  - B108 ×2 (Medium) are placeholder strings that are never created.
+  - B108 ×2 (Medium) are the real `/tmp` use, mitigated by an lstat sticky check, an exclusive random 0700 `mkdir` and a post-verify.
+  - B404/B603 (Low) are a fixed argv list with no shell.
+
+**Limits that still apply.** Process-group containment is not cgroup containment, and the reader thread of an escapee stays as a daemon until exit. Dummy grok only; no real model.
