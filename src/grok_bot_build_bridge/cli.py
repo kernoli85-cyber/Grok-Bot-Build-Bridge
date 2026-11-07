@@ -385,10 +385,10 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
         json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 2
-    if args.parse_grok_json or args.expect_bridge_ok:
+    if args.parse_grok_json or args.expect_bridge_ok or args.show_answer:
         from dataclasses import replace as _r
         from .runner.plan import GROK_SMOKE_EXPECTED
-        plan = _r(plan, parse_grok_json=True,
+        plan = _r(plan, parse_grok_json=True, return_answer=bool(args.show_answer),
                   expected_text=GROK_SMOKE_EXPECTED if args.expect_bridge_ok else None)
     try:
         outcome = execute_one_shot(
@@ -423,6 +423,8 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
             "lease_lost": outcome.lease_lost,
             "process_exit_ok": outcome.returncode == 0 if outcome.returncode is not None else None,
             "result_summary": outcome.result_summary,
+            **({"answer": outcome.answer_text, "answer_truncated": outcome.answer_truncated,
+                "answer_note": "transient display only; not stored"} if args.show_answer else {}),
             "state_db": str(store.db_path),
             "cancel_note": "cancellation is state-only; process tree kill not claimed",
             "cancel_capability": {
@@ -587,6 +589,130 @@ def _cmd_runner_wsl_grok_smoke(args: argparse.Namespace, store: JobStore) -> int
 
 # Indirection for tests (monkeypatch) - never starts a distro.
 _wsl_list_reader = _read_wsl_list_text
+
+
+def _run_fixed_wsl(argv: tuple[str, ...]) -> tuple[int | None, str]:
+    from .safe_exec import run_argv
+    r = run_argv(argv, timeout_sec=30.0, max_stdout_bytes=4096, max_stderr_bytes=4096)
+    return (None if (r.timed_out or r.error) else r.returncode), (r.stdout or "")
+
+
+# Indirection for tests (monkeypatch); only ever receives the fixed mktemp/find argv.
+_wsl_cmd_runner = _run_fixed_wsl
+
+ASK_DRYRUN_CWD = "/tmp/gbbb-ask-CREATEDONEXECUTE"
+
+
+def _read_ask_prompt(args: argparse.Namespace) -> str:
+    from .runner.plan import ASK_MAX_PROMPT_BYTES, validate_ask_prompt
+    sources = [x for x in (args.prompt is not None, bool(args.prompt_file), args.prompt_stdin) if x]
+    if len(sources) != 1:
+        raise PlanError("prompt_source", "give exactly one of --prompt, --prompt-file, --prompt-stdin")
+    if args.prompt is not None:
+        return validate_ask_prompt(args.prompt)
+    if args.prompt_file:
+        with open(args.prompt_file, "rb") as fh:
+            data = fh.read(ASK_MAX_PROMPT_BYTES + 1)
+    else:
+        data = sys.stdin.buffer.read(ASK_MAX_PROMPT_BYTES + 1)
+    return validate_ask_prompt(data)
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Text-only single prompt to Grok via wsl.exe. Dry-run default: no DB, no temp
+    dir, no host call, prompt not stored. Real call: --execute AND --allow-model-call."""
+    import uuid
+
+    from .runner.plan import (ASK_MAX_PROMPT_BYTES, build_wsl_grok_ask_plan,
+                              build_wsl_mktemp_ask_cwd_argv, build_wsl_verify_ask_cwd_argv,
+                              redact_argv_preview, require_wsl_distro_running)
+
+    def _err(code: str, msg: str) -> int:
+        json.dump({"error": {"code": code, "message": msg}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+
+    task_id = args.task_id or f"ask-{uuid.uuid4().hex[:16]}"
+    try:
+        prompt = _read_ask_prompt(args)
+        plan = build_wsl_grok_ask_plan(
+            task_id=task_id, distro=args.wsl_distro or "", user=args.wsl_user or "",
+            grok_path=args.executable or "", cwd=args.cwd or ASK_DRYRUN_CWD,
+            prompt=prompt, max_turns=args.max_turns, timeout_sec=args.timeout,
+        )
+    except PlanError as exc:
+        return _err(exc.code, exc.message)
+    except OSError as exc:
+        return _err("prompt_file_unreadable", type(exc).__name__)
+    if args.execute and not args.allow_model_call:
+        return _err("model_call_gated", "real Grok call requires --allow-model-call")
+    info = {
+        "mode": "text_only_single_prompt", "coding_agent": False,
+        "prompt_bytes": len(prompt.encode("utf-8")), "prompt_max_bytes": ASK_MAX_PROMPT_BYTES,
+        "prompt_stored": False,
+        "prompt_transport": "argv value of --single (grok headless does not read stdin as prompt)",
+        "prompt_process_visibility": "VISIBLE in OS process listings (wsl.exe command line, /proc cmdline) while running; preview redaction only hides it from bridge output",
+        "max_turns": plan.max_turns, "max_turns_is_cost_cap": False, "cost_cap_flag": None,
+        "timeout_sec": plan.timeout_sec,
+        "timeout": "kills host wsl.exe; guest cleanup not proven -> needs_review, no retry",
+        "tools": "builtin tools denied + deny rules incl MCPTool + dontAsk + strict sandbox (docs semantics, unverified on 1.0.70)",
+        "not_isolated": "user ~/.grok config and native MCP servers may still load; trust state of the fresh cwd unknown",
+        "approval": "--allow-model-call is a technical gate only; it does not replace the owner's explicit permission",
+    }
+    if not args.execute:
+        json.dump({"dry_run": True, "task_id": task_id, "grok_executed": False,
+                   "state_written": False, "temp_dir_created": False,
+                   "cwd_preview": args.cwd or ASK_DRYRUN_CWD + " (placeholder; mktemp on execute)",
+                   "argv_preview": list(redact_argv_preview(plan.argv)), "status": "dry_run",
+                   "limits": info}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0
+    text, err = _wsl_list_reader()
+    if err is not None:
+        return _err("wsl_list_failed", err)
+    try:
+        require_wsl_distro_running(plan.wsl_distro or "", text or "")
+    except PlanError as exc:
+        return _err(exc.code, exc.message)
+    cwd = args.cwd
+    if not cwd:
+        rc, out = _wsl_cmd_runner(build_wsl_mktemp_ask_cwd_argv(plan.wsl_distro, plan.wsl_user))
+        cwd = out.strip()
+        if rc != 0:
+            return _err("ask_cwd_create_failed", "mktemp via wsl.exe failed")
+    try:
+        verify = build_wsl_verify_ask_cwd_argv(plan.wsl_distro, plan.wsl_user, cwd)
+    except PlanError as exc:
+        return _err(exc.code, exc.message)
+    rc, out = _wsl_cmd_runner(verify)
+    if rc != 0 or out.strip() != cwd:
+        return _err("ask_cwd_unsafe", "cwd must be an existing empty real dir owned by the user, not group/world-writable, not a symlink")
+    from dataclasses import replace as _r
+    plan = build_wsl_grok_ask_plan(
+        task_id=task_id, distro=plan.wsl_distro, user=plan.wsl_user, grok_path=plan.executable,
+        cwd=cwd, prompt=prompt, max_turns=plan.max_turns, timeout_sec=plan.timeout_sec)
+    plan = _r(plan, return_answer=bool(args.show_answer))
+    store = _store_from_args(args)
+    try:
+        outcome = execute_one_shot(store, plan, owner=args.owner, dry_run=False)
+    except StoreError as exc:
+        return _err(exc.code, exc.message)
+    payload = {
+        "dry_run": False, "task_id": task_id, "grok_executed": True, "cwd": cwd,
+        "argv_preview": list(redact_argv_preview(plan.argv)),
+        "execution_transport": outcome.execution_transport,
+        "status": outcome.status, "returncode": outcome.returncode,
+        "process_exit_ok": outcome.returncode == 0 if outcome.returncode is not None else None,
+        "timed_out": outcome.timed_out, "error_code": outcome.error_code, "note": outcome.note,
+        "result_summary": outcome.result_summary, "limits": info,
+    }
+    if args.show_answer:
+        payload["answer"] = outcome.answer_text
+        payload["answer_truncated"] = outcome.answer_truncated
+        payload["answer_note"] = "transient display only; not stored in state/outbox/MCP"
+    json.dump(payload, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0 if outcome.status == "succeeded" else 1
 
 
 def cmd_jobs_retry(args: argparse.Namespace) -> int:
@@ -1029,8 +1155,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--extra", action="append", default=[])
     p_run.add_argument("--execute", action="store_true", help="Actually spawn process")
     p_run.add_argument("--parse-grok-json", action="store_true", help="Parse stdout as grok --output-format json into an allowlisted summary (text never stored)")
+    p_run.add_argument("--show-answer", action="store_true", help="With --parse-grok-json: print bounded answer (transient; not stored)")
     p_run.add_argument("--expect-bridge-ok", action="store_true", help="Require exact BRIDGE_OK text (implies --parse-grok-json)")
     p_run.set_defaults(func=cmd_runner_run)
+
+    p_ask = sub.add_parser("ask", help="Text-only single Grok prompt via wsl.exe (dry-run default)")
+    p_ask.add_argument("--prompt", default=None)
+    p_ask.add_argument("--prompt-file", default=None)
+    p_ask.add_argument("--prompt-stdin", action="store_true")
+    p_ask.add_argument("--wsl-distro", required=True)
+    p_ask.add_argument("--wsl-user", required=True)
+    p_ask.add_argument("--executable", required=True, help="Absolute POSIX path to grok inside WSL")
+    p_ask.add_argument("--cwd", default=None, help="Existing /tmp/gbbb-ask-<random> dir (default: mktemp on execute)")
+    p_ask.add_argument("--max-turns", type=int, default=1)
+    p_ask.add_argument("--timeout", type=float, default=180.0)
+    p_ask.add_argument("--task-id", default=None)
+    p_ask.add_argument("--state-db", default=None, help="Used only with --execute")
+    p_ask.add_argument("--owner", default="local-worker")
+    p_ask.add_argument("--execute", action="store_true")
+    p_ask.add_argument("--allow-model-call", action="store_true")
+    p_ask.add_argument("--show-answer", action="store_true", help="Print bounded answer text (transient; not stored)")
+    p_ask.set_defaults(func=cmd_ask)
 
     p_retry = sub.add_parser("jobs-retry", help="Explicit retry from failed/needs_review")
     p_retry.add_argument("--state-db", required=True)

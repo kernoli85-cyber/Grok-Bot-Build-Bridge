@@ -246,3 +246,25 @@ def validate_summary(d: Any) -> bool:
     if d["matched_text"] is not None and d["expected_match"] is not True:
         return False
     return True
+
+
+ANSWER_MAX_CHARS = 16_000
+_ANSWER_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def extract_answer_text(stdout: str | bytes | None, *, truncated: bool = False) -> tuple[str | None, bool]:
+    """Transient, bounded answer text for opt-in console display. Never persisted.
+
+    Returns (text, was_cut). Only from a fully valid JSON result's text field;
+    terminal control / bidi characters are replaced with U+FFFD; newlines/tabs kept.
+    """
+    if parse_grok_json_result(stdout, truncated=truncated).parse_status != "ok":
+        return None, False
+    if isinstance(stdout, bytes):
+        stdout = stdout.decode("utf-8")
+    obj = json.loads(stdout.strip(), parse_float=Decimal, parse_constant=lambda _c: None)
+    text, _ = _first(obj, _TEXT_KEYS)
+    clean = _ANSWER_CTRL.sub("\ufffd", text.replace("\r\n", "\n"))
+    if len(clean) > ANSWER_MAX_CHARS:
+        return clean[:ANSWER_MAX_CHARS], True
+    return clean, False

@@ -82,6 +82,7 @@ class ApprovedExecutionPlan:
     wsl_user: str | None = None
     parse_grok_json: bool = False
     expected_text: str | None = None
+    return_answer: bool = False  # transient console display only; never persisted
 
 
 def _reject_forbidden(tokens: Sequence[str]) -> None:
@@ -446,3 +447,113 @@ def build_wsl_grok_smoke_plan(
         wsl_distro=probe.wsl_distro, wsl_user=probe.wsl_user,
         parse_grok_json=True, expected_text="BRIDGE_OK",
     )
+
+
+# --- Text-only one-shot "ask" via wsl.exe (same isolation as the smoke) ---
+# Prompt transport: grok headless does NOT read piped stdin as the prompt (docs main);
+# `--prompt-file /dev/stdin` is undocumented upstream and unverified on 1.0.70.
+# Therefore the prompt is passed as the argv value of `--single`. It IS visible in
+# process listings (Windows wsl.exe command line, Linux /proc/<pid>/cmdline) while
+# the call runs. Preview redaction only hides it from bridge output, not the OS.
+ASK_MAX_PROMPT_BYTES = 8 * 1024          # far below the 32767-char Windows cmdline limit
+ASK_MAX_TURNS_LIMIT = 10
+ASK_MAX_TIMEOUT_SEC = 600.0
+_ASK_CWD = re.compile(r"^/tmp/gbbb-ask-[A-Za-z0-9]{8,32}$")
+_PROMPT_BAD = re.compile(r"[\x00-\x08\x0b-\x1f\x7f\u2028\u2029\u202a-\u202e\u2066-\u2069]")
+
+
+def validate_ask_prompt(prompt: str | bytes) -> str:
+    """Bounded UTF-8 text prompt; no NUL/control/bidi chars; cannot look like a flag."""
+    if isinstance(prompt, bytes):
+        if len(prompt) > ASK_MAX_PROMPT_BYTES:
+            raise PlanError("prompt_too_large", f"prompt exceeds {ASK_MAX_PROMPT_BYTES} bytes")
+        try:
+            prompt = prompt.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise PlanError("prompt_not_utf8", "prompt must be valid UTF-8") from exc
+    if not isinstance(prompt, str):
+        raise PlanError("prompt_invalid", "prompt must be text")
+    if prompt.startswith("\ufeff"):
+        prompt = prompt[1:]
+    p = prompt.strip()
+    if not p:
+        raise PlanError("prompt_empty", "prompt is empty")
+    if len(p.encode("utf-8")) > ASK_MAX_PROMPT_BYTES:
+        raise PlanError("prompt_too_large", f"prompt exceeds {ASK_MAX_PROMPT_BYTES} bytes")
+    if _PROMPT_BAD.search(p):
+        raise PlanError("prompt_control_chars", "prompt contains control or bidi characters")
+    if p.startswith("-"):
+        raise PlanError("prompt_flag_like", "prompt must not start with '-' (could be parsed as a flag)")
+    return p
+
+
+def build_wsl_grok_ask_plan(
+    *,
+    task_id: str,
+    distro: str,
+    user: str,
+    grok_path: str,
+    cwd: str,
+    prompt: str,
+    max_turns: int = 1,
+    timeout_sec: float = 180.0,
+) -> ApprovedExecutionPlan:
+    """Text-only single prompt via wsl.exe with the smoke's isolation flags/deny rules.
+
+    Not a coding agent: all builtin tools denied, dontAsk, strict sandbox, fresh empty
+    cwd /tmp/gbbb-ask-<random>. Generic answers: no fixed expected text.
+    """
+    c = (cwd or "").strip()
+    if not _ASK_CWD.match(c):
+        raise PlanError("ask_cwd_invalid", "ask cwd must be a fresh /tmp/gbbb-ask-<random> dir")
+    if isinstance(max_turns, bool) or not isinstance(max_turns, int) or not 1 <= max_turns <= ASK_MAX_TURNS_LIMIT:
+        raise PlanError("max_turns_invalid", f"max_turns must be an int 1..{ASK_MAX_TURNS_LIMIT}")
+    t = float(timeout_sec)
+    if not (t > 0 and t <= ASK_MAX_TIMEOUT_SEC):
+        raise PlanError("timeout_invalid", f"timeout must be 0..{ASK_MAX_TIMEOUT_SEC}s")
+    p = validate_ask_prompt(prompt)
+    smoke = build_wsl_grok_smoke_plan(
+        task_id=task_id, distro=distro, user=user, grok_path=grok_path,
+        cwd="/tmp/gbbb-smoke-placeholder0", timeout_sec=min(t, 120.0),
+    )
+    flags = list(GROK_SMOKE_FIXED_FLAGS)
+    flags[flags.index("--max-turns") + 1] = str(max_turns)
+    deny: list[str] = []
+    for r in GROK_SMOKE_DENY_RULES:
+        deny += ["--deny", r]
+    head = ("wsl.exe", "-d", smoke.wsl_distro, "-u", smoke.wsl_user, "--cd", c,
+            "--exec", "/usr/bin/env", *GROK_SMOKE_ENV, smoke.executable)
+    tail = ("--cwd", c, *flags, *deny)
+    _reject_forbidden(head + tail)  # prompt is a value, not a flag; checked separately
+    argv = (*head, "--single", p, *tail)
+    return ApprovedExecutionPlan(
+        task_id=smoke.task_id, backend="wsl", cwd=c, executable=smoke.executable, argv=argv,
+        timeout_sec=t, max_turns=max_turns, permission_mode="dontAsk",
+        allow_rules=(), deny_rules=GROK_SMOKE_DENY_RULES, stdin_bytes=None,
+        env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": smoke.task_id},
+        prompt_via_stdin=False, force_prompt_argv=True,
+        execution_transport="wsl_exe", execution_kind="grok_ask_text_one_shot",
+        wsl_distro=smoke.wsl_distro, wsl_user=smoke.wsl_user,
+        parse_grok_json=True, expected_text=None,
+    )
+
+
+def build_wsl_mktemp_ask_cwd_argv(distro: str, user: str) -> tuple[str, ...]:
+    """Fixed argv creating a fresh 0700 dir via mktemp inside a RUNNING distro."""
+    probe = build_wsl_probe_plan(task_id="mktemp", distro=distro, user=user, cwd="/tmp")
+    return ("wsl.exe", "-d", probe.wsl_distro, "-u", probe.wsl_user, "--cd", "/tmp",
+            "--exec", "/usr/bin/mktemp", "-d", "/tmp/gbbb-ask-XXXXXXXXXXXX")
+
+
+def build_wsl_verify_ask_cwd_argv(distro: str, user: str, cwd: str) -> tuple[str, ...]:
+    """Fixed read-only check: real dir (not symlink), empty, owned by user, not g/o-writable.
+
+    find's default -P never follows a symlinked start point, so a symlink fails -type d.
+    Output must equal the path exactly to pass.
+    """
+    if not _ASK_CWD.match(cwd or ""):
+        raise PlanError("ask_cwd_invalid", "ask cwd must be /tmp/gbbb-ask-<random>")
+    probe = build_wsl_probe_plan(task_id="verify", distro=distro, user=user, cwd="/tmp")
+    return ("wsl.exe", "-d", probe.wsl_distro, "-u", probe.wsl_user, "--cd", "/tmp",
+            "--exec", "/usr/bin/find", cwd, "-maxdepth", "0", "-type", "d", "-empty",
+            "-user", probe.wsl_user, "!", "-perm", "/022", "-print")

@@ -228,6 +228,27 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     assert jobs["ok1"]["status"] == "succeeded" and jobs["ok1"]["result_summary"]["session_id"] == "0d3f-AB_9"
     assert jobs["noise1"]["status"] == "needs_review" and jobs["noise1"]["result_summary"]["parse_status"] == "not_json"
 
+    # Generic (non-smoke) answer: real dummy subprocess, transient opt-in display.
+    ans_dummy = work / "bridge-dummy-answer.py"
+    shutil.copy(src, ans_dummy)
+    r = cli("runner-run", "--state-db", str(db), "--task-id", "ans1", "--backend", "native",
+            "--cwd", str(work), "--executable", str(ans_dummy), "--parse-grok-json", "--show-answer", "--execute")
+    d = json.loads(r.stdout)
+    assert r.returncode == 0 and d["status"] == "succeeded" and "Gr\u00fc\u00dfe" in d["answer"]
+    assert d["result_summary"]["matched_text"] is None
+    assert b"Antwort" not in db.read_bytes()
+
+    # ask dry-run from the installed wheel: no DB, no data dirs, prompt not echoed.
+    xdg = tmp_path / "xdg"
+    ask_env = {**env, "XDG_DATA_HOME": str(xdg / "d"), "XDG_CONFIG_HOME": str(xdg / "c"),
+               "LOCALAPPDATA": str(xdg / "l")}
+    ask_db = tmp_path / "ask" / "never.db"
+    r = _run([str(exe), "ask", "--prompt", 'Sag "Hallo" \u00fc SECRETP', "--wsl-distro", "Ubuntu",
+              "--wsl-user", "okern", "--executable", "/usr/bin/grok", "--state-db", str(ask_db)], cwd=work, env=ask_env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert json.loads(r.stdout)["state_written"] is False and "SECRETP" not in r.stdout
+    assert not ask_db.exists() and not xdg.exists()
+
     r = cli("outbox-pump", "--state-db", str(db))  # dry-run default; no --send
     assert r.returncode == 0, r.stdout + r.stderr
     assert "0d3f-AB_9" not in r.stdout and "BRIDGE_OK" not in r.stdout

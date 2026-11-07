@@ -31,6 +31,8 @@ class RunOutcome:
     execution_transport: str | None = None
     execution_kind: str | None = None
     result_summary: dict | None = None
+    answer_text: str | None = None  # transient, opt-in display only; never stored
+    answer_truncated: bool = False
 
 
 def _heartbeat_loop(
@@ -171,8 +173,15 @@ def _commit_parsed_result(
     else:
         code, terminal = f"signal_or_abort_{result.returncode}", JobStatus.NEEDS_REVIEW
 
+    answer, cut = (None, False)
+    if plan.return_answer:
+        from .grok_result import extract_answer_text
+        answer, cut = extract_answer_text(result.stdout, truncated=result.stdout_truncated)
+
     def out(status: str, error_code: str | None, note: str, *, rs=None, lease_lost=False):
+        show = not lease_lost and status != "cancelled"
         return RunOutcome(
+            answer_text=answer if show else None, answer_truncated=cut if show else False,
             dry_run=False, task_id=plan.task_id, status=status,
             returncode=result.returncode, timed_out=False, error_code=error_code,
             stdout_truncated=result.stdout_truncated, stderr_truncated=result.stderr_truncated,

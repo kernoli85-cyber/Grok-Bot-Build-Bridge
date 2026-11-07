@@ -188,3 +188,42 @@ sessionId and cost were discarded by 0.16.2 and are unknown; they were not recov
 3. Webhook send path behind existing `--send` gate with result-free payloads; dry-run first.
 4. Host install of the next tagged build only after user approval; one approved smoke to
    confirm the real 1.0.70 JSON shape.
+
+## v0.17.0 — `ask`: text-only single prompt (not a coding agent)
+
+```
+grok-bot-build-bridge ask --prompt "…" --wsl-distro Ubuntu --wsl-user <user> \
+  --executable /abs/path/to/grok [--max-turns 1..10] [--timeout ≤600] \
+  [--execute --allow-model-call [--show-answer] [--state-db PATH]]
+```
+
+- **Dry-run default:** no DB, no data dirs, no temp dir, no host/WSL call; prompt is not
+  stored or echoed (preview shows `<redacted_prompt>`; only byte length is reported).
+- **Gate:** a real call needs `--execute --allow-model-call`. These flags are a technical
+  gate only — they do **not** replace the owner's explicit permission for each paid call.
+- **Same isolation as the smoke:** wsl.exe into a *Running* distro (never started),
+  `/usr/bin/env` switches, all builtin tools disallowed, deny rules incl. MCPTool,
+  `--permission-mode dontAsk`, `--sandbox strict`, no subagents/plan/web search.
+  Per-job finite `--max-turns` (turn cap, **not** a cost cap; 1.0.70 has no cost-cap flag).
+- **Fresh cwd:** `mktemp -d /tmp/gbbb-ask-XXXXXXXXXXXX` via wsl.exe, then a fixed read-only
+  `find` check: real directory (symlink rejected), empty, owned by the user, not
+  group/world-writable. Never home or a repo. Grok's trust state for that dir is unknown.
+- **Prompt transport:** grok headless does not read stdin as prompt (docs); the prompt is the
+  argv value of `--single` and is **visible in OS process listings** (Windows command line,
+  `/proc/<pid>/cmdline`) while running. Bounded to 8 KiB UTF-8; NUL/control/bidi characters
+  and a leading `-` are rejected. `--prompt-file`/`--prompt-stdin` only change how the
+  bridge reads it.
+- **Answer:** `--show-answer` prints the parsed JSON `text`, bounded to 16 000 chars,
+  terminal-control/bidi chars replaced, newlines/Unicode kept — transient only, never in
+  DB, outbox or MCP. Hidden if the job was cancelled or the lease lost.
+- **Success** = exit 0 + one valid JSON object + `end_turn` + not `is_error`, committed
+  atomically with the strict summary. No fixed expected text (BRIDGE_OK is smoke-only).
+  Timeout → `needs_review/timeout_uncertain` (guest cleanup unproven); never retried.
+- Tests mock the WSL side (labelled) and use a real dummy subprocess for Grok output;
+  no real host is exercised. Real 1.0.70 output shape still unverified.
+
+### Next bounded plan
+1. MCP: read-only result-metadata tool behind a startup opt-in (no session id, no text, no start/write tools).
+2. `ask` progress/status UX: `jobs-status --task-id`, concise human output mode.
+3. Webhook result-free events via existing `--send` gate (dry-run first).
+4. With the owner's approval only: install 0.17.0 on host + one approved `ask` to confirm the real JSON shape.
