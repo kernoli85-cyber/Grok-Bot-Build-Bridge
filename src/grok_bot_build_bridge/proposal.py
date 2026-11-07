@@ -150,6 +150,103 @@ def stage_proposal(source: str, files: list[str], instruction: str, key: bytes):
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def model_text_diagnostic(text: str | None, *, extraction_key: str = "none",
+                          alternate_present: bool = False, alternate_bytes: int | None = None,
+                          fields_equal: bool = False, stdout_truncated: bool = False) -> dict[str, Any]:
+    """Content-free description of why a proposal text was rejected.
+
+    Lengths, field name, leading class, fence class, and a JSON error class plus
+    character offset. No answer text, paths, or schema values.
+    ``stdout_truncated`` is the bridge capture cap only. Token counts are not included
+    and do not prove that the model cut its own answer short.
+    """
+    raw = text or ""
+    stripped = raw.strip()
+    fence = "backtick" if "```" in stripped else "gbbb" if "<<<" in stripped else "none"
+    diag: dict[str, Any] = {
+        "extraction_key": extraction_key if extraction_key in {"text", "result", "none"} else "none",
+        "alternate_text_key_present": bool(alternate_present),
+        "alternate_bytes": alternate_bytes if alternate_present else None,
+        "text_fields_equal": bool(fields_equal),
+        "extracted_bytes": len(raw.encode()),
+        "extracted_chars": len(raw),
+        "empty": stripped == "",
+        "leading": _leading(stripped),
+        "fence": fence,
+        "fenced_json": _fenced_json(stripped) if fence == "backtick" else False,
+        "stdout_capture_truncated": bool(stdout_truncated),
+        "json": "empty" if stripped == "" else "unchecked",
+        "json_offset": None,
+    }
+    if fence != "none" or stripped == "":
+        return diag
+    decoder = json.JSONDecoder(object_pairs_hook=_no_dupes)
+    try:
+        decoder.raw_decode(stripped)
+    except json.JSONDecodeError as exc:
+        diag["json"] = _json_reason(exc)
+        diag["json_offset"] = exc.pos
+    except RecursionError:
+        diag["json"] = "recursion"
+        diag["json_offset"] = None
+    else:
+        diag["json"] = "parsed"
+        diag["json_offset"] = None
+    return diag
+
+
+def _leading(text: str) -> str:
+    if not text:
+        return "empty"
+    ch = text[0]
+    if ch == "{":
+        return "object"
+    if ch == "[":
+        return "array"
+    if ch == '"':
+        return "quote"
+    if ch == "`":
+        return "backtick"
+    if ch == "<":
+        return "angle"
+    if ch == "\ufeff":
+        return "bom"
+    if ch.isalpha():
+        return "letter"
+    if ch.isdigit():
+        return "digit"
+    return "other"
+
+
+def _json_reason(exc: json.JSONDecodeError) -> str:
+    msg = exc.msg.lower()
+    if msg.startswith("expecting value"):
+        return "expecting_value"
+    if "property name" in msg:
+        return "expecting_property"
+    if "unterminated" in msg:
+        return "unterminated_string"
+    if "control character" in msg:
+        return "invalid_control"
+    if "escape" in msg:
+        return "invalid_escape"
+    if msg.startswith("expecting"):
+        return "expecting_delimiter"
+    return "json_decode"
+
+
+def _fenced_json(text: str) -> bool:
+    mark = text.find("```")
+    if mark < 0:
+        return False
+    after = text[mark + 3:]
+    nl = after.find("\n")
+    body = after[nl + 1:] if nl >= 0 else after
+    close = body.rfind("```")
+    inner = (body[:close] if close >= 0 else body).strip()
+    return inner.startswith("{") or inner.startswith("[")
+
+
 def parse_replacements(text: str, selection: list[str]) -> dict[str, str]:
     """Accept exactly one replacement object. Reject chatter, fences, and extra paths."""
     if not isinstance(text, str) or not text.strip():

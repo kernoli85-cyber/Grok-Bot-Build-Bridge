@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from grok_bot_build_bridge.proposal import ProposalError, parse_replacements
+from grok_bot_build_bridge.proposal import ProposalError, model_text_diagnostic, parse_replacements
 
 SEL = ["notes/a.txt"]
 
@@ -35,6 +35,29 @@ def test_rejects_malformed_schema_chatter_and_duplicate_json():
 def test_identical_content_parses():
     found = parse_replacements(_obj([{"path": "notes/a.txt", "content": "same\n"}]), SEL)
     assert found == {"notes/a.txt": "same\n"}
+
+
+def test_diagnostic_categories_do_not_include_text():
+    prose = "def add(a, b):\n    return a + b\n"
+    diag = model_text_diagnostic(prose, extraction_key="text", stdout_truncated=False)
+    blob = json.dumps(diag)
+    assert diag["leading"] == "letter" and diag["json"] == "expecting_value" and diag["json_offset"] == 0
+    assert diag["fence"] == "none" and diag["fenced_json"] is False
+    assert diag["stdout_capture_truncated"] is False
+    assert "def add" not in blob and "return" not in blob
+    fenced = "```json\n" + _obj([{"path": "notes/a.txt", "content": "beta\n"}]) + "\n```"
+    wrapped = model_text_diagnostic(fenced)
+    assert wrapped["fence"] == "backtick" and wrapped["fenced_json"] is True
+    with pytest.raises(ProposalError) as exc:
+        parse_replacements(fenced, SEL)
+    assert exc.value.code == "proposal_chatter"
+    assert "notes/a.txt" not in json.dumps(wrapped) and "beta" not in json.dumps(wrapped)
+    partial = '{"schema":"gbbb.file_replacements/v1","files":['
+    cut = model_text_diagnostic(partial, extraction_key="result")
+    assert cut["leading"] == "object" and cut["extraction_key"] == "result"
+    assert cut["json"] in {"unterminated_string", "expecting_delimiter", "expecting_value", "expecting_property", "json_decode"}
+    assert isinstance(cut["json_offset"], int)
+    assert "gbbb.file_replacements" not in json.dumps(cut)
 
 
 def test_files_only_object_stays_wrong_schema():

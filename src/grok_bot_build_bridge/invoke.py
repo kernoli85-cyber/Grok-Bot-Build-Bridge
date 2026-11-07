@@ -326,6 +326,7 @@ def run_invoke(raw: bytes) -> int:
         return _err("consent_mismatch", "launch argv differs from the confirmed plan")
     res = PL.run_local(real, show_answer=checked["show"], capture_text=(obj["op"] == "propose"))
     captured = res.pop("captured_text", None)
+    captured_meta = res.pop("captured_meta", None) or {}
     body = {
         "schema": SCHEMA, "mode": "execute", "op": obj["op"], "model_call": True,
         "stored": False, "db": False, "outbox": False, "mcp": False, "retry": False,
@@ -339,8 +340,14 @@ def run_invoke(raw: bytes) -> int:
         body["status"] = "execution_" + res["status"]
         return _out(body, 3)
     from .context_pack import ContextError
-    from .proposal import ProposalError, parse_replacements, review, stage_proposal
+    from .proposal import ProposalError, model_text_diagnostic, parse_replacements, review, stage_proposal
     from .snapshot_posix import SnapshotError
+    diagnostic = model_text_diagnostic(
+        captured, extraction_key=str(captured_meta.get("key") or "none"),
+        alternate_present=bool(captured_meta.get("alternate_present")),
+        alternate_bytes=captured_meta.get("alternate_bytes"),
+        fields_equal=bool(captured_meta.get("fields_equal")),
+        stdout_truncated=bool(res.get("stdout_truncated")))
     try:
         _packed, now, _skipped = stage_proposal(
             info["source"], info["files"], info["instruction"], info["key"])
@@ -352,7 +359,8 @@ def run_invoke(raw: bytes) -> int:
     except (ProposalError, ContextError, SnapshotError) as exc:
         body["status"] = "proposal_rejected"
         body["proposal"] = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
-                            "source_writes": False, "stored": False, "error": exc.code}
+                            "source_writes": False, "stored": False, "error": exc.code,
+                            "diagnostic": diagnostic}
         return _out(body, 3)
     body["status"] = "proposal_accepted"
     return _out(body, 0)

@@ -34,12 +34,12 @@ def _source(tmp_path, text="alpha\n"):
     return src, path
 
 
-def _dummy(tmp_path, text, model="provider-model-id"):
+def _dummy(tmp_path, text, model="provider-model-id", field="text"):
     bindir = tmp_path / "bin"
     bindir.mkdir(mode=0o755, parents=True)
     dummy = bindir / "grok"
-    grok = {"text": text, "stopReason": "end_turn", "num_turns": 1,
-            "usage": {"input_tokens": 1, "output_tokens": 1}, "modelUsage": {model: {}}}
+    grok = {field: text, "stopReason": "end_turn", "num_turns": 1,
+            "usage": {"input_tokens": 1, "output_tokens": 40}, "modelUsage": {model: {}}}
     dummy.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
                      "assert '--sandbox' in sys.argv and 'MCPTool' in sys.argv and os.listdir('.') == []\n"
                      "print(json.dumps(" + json.dumps(grok) + "))\n")
@@ -228,3 +228,35 @@ def test_constructed_prompt_requires_schema_and_contract_reply_is_accepted(monke
     code, bad = _run(sent, capsys)
     assert code == 3 and bad["status"] == "proposal_rejected" and bad["proposal"]["error"] == "proposal_wrong_schema"
     assert bad["result"]["status"] == "succeeded" and (src / "calc.py").read_text() == CALC
+    assert "return a + b" not in json.dumps(bad["proposal"]["diagnostic"])
+
+
+def test_result_field_and_prose_diagnostic_do_not_echo_text(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    src = tmp_path / "src"
+    src.mkdir()
+    os.chmod(src, 0o755)
+    (src / "calc.py").write_text(CALC)
+    reply = json.dumps({"schema": "gbbb.file_replacements/v1",
+                        "files": [{"path": "calc.py", "content": CALC_FIXED}]})
+    dummy = _dummy(tmp_path / "via-result", reply, field="result")
+    code, dry = _run(_body(dummy, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul."), capsys)
+    sent = _body(dummy, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul.",
+                 execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
+    code, done = _run(sent, capsys)
+    assert code == 0 and done["status"] == "proposal_accepted"
+    assert (src / "calc.py").read_text() == CALC
+
+    prose = _dummy(tmp_path / "prose", "def add(a, b):\n    return a + b\n")
+    code, dry = _run(_body(prose, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul."), capsys)
+    sent = _body(prose, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul.",
+                 execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
+    code, bad = _run(sent, capsys)
+    diag = bad["proposal"]["diagnostic"]
+    assert code == 3 and bad["status"] == "proposal_rejected" and bad["proposal"]["error"] == "proposal_malformed"
+    assert bad["result"]["status"] == "succeeded" and bad["result"]["stdout_truncated"] is False
+    assert diag["extraction_key"] == "text" and diag["leading"] == "letter"
+    assert diag["json"] == "expecting_value" and diag["json_offset"] == 0 and diag["fence"] == "none"
+    blob = json.dumps(diag)
+    assert "def add" not in blob and "calc.py" not in blob and "Keep mul" not in blob
+    assert (src / "calc.py").read_text() == CALC

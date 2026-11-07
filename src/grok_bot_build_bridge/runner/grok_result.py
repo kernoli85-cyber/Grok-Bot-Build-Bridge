@@ -269,23 +269,44 @@ ANSWER_MAX_CHARS = 16_000
 _ANSWER_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 
 
-def result_text(stdout: str | bytes | None) -> str | None:
-    """Raw JSON text field for a caller that will validate it. Not for display or storage."""
+def result_text_meta(stdout: str | bytes | None) -> dict[str, Any]:
+    """Which supported answer field was read. Does not echo the text.
+
+    ``text`` is preferred, then ``result``, matching parse_grok_json_result.
+    """
+    none = {"text": None, "key": "none", "alternate_present": False,
+            "alternate_bytes": None, "fields_equal": False}
     if not stdout:
-        return None
+        return none
     if isinstance(stdout, bytes):
         try:
             stdout = stdout.decode("utf-8", errors="strict")
         except UnicodeDecodeError:
-            return None
+            return none
     try:
         obj = json.loads(stdout.strip())
     except (ValueError, RecursionError):
-        return None
+        return none
     if not isinstance(obj, dict):
-        return None
-    text = obj.get("text")
-    return text if isinstance(text, str) else None
+        return none
+    value, idx = _first(obj, _TEXT_KEYS)
+    if idx is None or not isinstance(value, str):
+        return none
+    other_key = _TEXT_KEYS[1 - idx]
+    other = obj.get(other_key)
+    alt = isinstance(other, str)
+    return {
+        "text": value,
+        "key": _TEXT_KEYS[idx],
+        "alternate_present": alt,
+        "alternate_bytes": len(other.encode()) if alt else None,
+        "fields_equal": bool(alt and other == value),
+    }
+
+
+def result_text(stdout: str | bytes | None) -> str | None:
+    """Answer string from the same field the result parser uses. Not for display or storage."""
+    return result_text_meta(stdout)["text"]
 
 
 def extract_answer_text(stdout: str | bytes | None, *, truncated: bool = False) -> tuple[str | None, bool]:

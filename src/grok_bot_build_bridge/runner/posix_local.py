@@ -228,10 +228,12 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False, capture_text: bool 
         res["answer"] = text
         res["answer_cut"] = cut
     if capture_text and summary.parse_status == "ok":
-        from .grok_result import result_text
-        raw = result_text(stdout)
-        if raw is not None:
-            res["captured_text"] = raw
+        from .grok_result import result_text_meta
+        meta = result_text_meta(stdout)
+        res["captured_meta"] = {k: meta[k] for k in
+                                ("key", "alternate_present", "alternate_bytes", "fields_equal")}
+        if meta["text"] is not None:
+            res["captured_text"] = meta["text"]
     return res
 
 
