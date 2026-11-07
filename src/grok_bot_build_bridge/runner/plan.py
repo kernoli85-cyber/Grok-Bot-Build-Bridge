@@ -74,6 +74,12 @@ class ApprovedExecutionPlan:
     env: dict[str, str]
     prompt_via_stdin: bool
     force_prompt_argv: bool
+    # Truthful separation: plan backend (operator-selected) vs how the process is
+    # actually spawned. "wsl" plan + "host_python" transport is NOT WSL execution.
+    execution_transport: str = "host_direct"
+    execution_kind: str = "unspecified"
+    wsl_distro: str | None = None
+    wsl_user: str | None = None
 
 
 def _reject_forbidden(tokens: Sequence[str]) -> None:
@@ -224,16 +230,29 @@ def build_approved_plan(
     _reject_forbidden(tokens)
 
     name = Path(exe).name
+    is_dummy = name.startswith("bridge-dummy")
     needs_py_launcher = name.endswith(".py") or (
-        name.startswith("bridge-dummy") and sys.platform.startswith("win")
+        is_dummy and sys.platform.startswith("win")
     )
     if needs_py_launcher and not name.endswith(".ps1"):
         argv = (sys.executable, exe, *tokens)
+        transport = "host_python"
     elif backend == "native":
         argv = build_native_invocation(exe, tokens)
+        transport = "host_direct"
     else:
-        # WSL/Linux: direct executable path as argv0 (shebang scripts OK on POSIX)
+        if sys.platform.startswith("win") and not is_dummy:
+            # A Linux grok path cannot be spawned directly from Windows; the
+            # previous behaviour silently ran on the host. Fail closed.
+            raise PlanError(
+                "wsl_transport_required",
+                "backend=wsl on Windows requires the wsl.exe transport "
+                "(build_wsl_exec_plan); direct host spawn refused",
+            )
+        # POSIX host (e.g. Bot BOX / CI Linux): direct spawn - NOT inside WSL.
         argv = (exe, *tokens)
+        transport = "host_direct_posix"
+    kind = "dummy" if is_dummy else "grok"
 
     return ApprovedExecutionPlan(
         task_id=task_id.strip(),
@@ -250,4 +269,92 @@ def build_approved_plan(
         env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": task_id.strip()},
         prompt_via_stdin=via_stdin,
         force_prompt_argv=force_prompt_argv,
+        execution_transport=transport,
+        execution_kind=kind,
     )
+
+
+_POSIX_CWD = re.compile(r"^/[A-Za-z0-9._/@+-]*$")
+WSL_PROBE_EXECUTABLE = "/usr/bin/printf"
+
+
+def build_wsl_probe_plan(
+    *,
+    task_id: str,
+    distro: str,
+    user: str,
+    cwd: str,
+    timeout_sec: float = 20.0,
+) -> ApprovedExecutionPlan:
+    """Fixed, read-only WSL transport probe: ``/usr/bin/printf`` inside a RUNNING distro.
+
+    Proves the wsl.exe transport + job/outbox lifecycle only. It is NOT a Grok run
+    and must never be reported as Grok success. No file writes, no shell, no
+    operator-supplied command. Caller must verify the distro is Running first
+    (``require_wsl_distro_running``); wsl.exe would otherwise start it.
+    """
+    from ..discovery import is_safe_identity
+
+    if not task_id.strip() or not is_safe_identity(task_id.strip()):
+        raise PlanError("task_id_invalid", "task_id must be a safe identity")
+    if not is_safe_identity(distro):
+        raise PlanError("wsl_distro_invalid", "unsafe distro name")
+    if not is_safe_identity(user):
+        raise PlanError("wsl_user_invalid", "unsafe user name")
+    if user == "root":
+        raise PlanError("wsl_root_refused", "root user refused; use the discovered non-root user")
+    c = (cwd or "").strip()
+    if not c or not _POSIX_CWD.match(c) or ".." in c.split("/"):
+        raise PlanError("cwd_invalid", "WSL cwd must be a safe absolute POSIX path")
+    if timeout_sec <= 0 or timeout_sec > 120:
+        raise PlanError("timeout_invalid", "probe timeout out of bounds")
+    tid = task_id.strip()
+    argv = (
+        "wsl.exe",
+        "-d",
+        distro,
+        "-u",
+        user,
+        "--cd",
+        c,
+        "--exec",
+        WSL_PROBE_EXECUTABLE,
+        "bridge-wsl-probe task=%s\\n",
+        tid,
+    )
+    return ApprovedExecutionPlan(
+        task_id=tid,
+        backend="wsl",
+        cwd=c,
+        executable=WSL_PROBE_EXECUTABLE,
+        argv=argv,
+        timeout_sec=float(timeout_sec),
+        max_turns=None,
+        permission_mode=None,
+        allow_rules=(),
+        deny_rules=(),
+        stdin_bytes=None,
+        env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": tid},
+        prompt_via_stdin=False,
+        force_prompt_argv=False,
+        execution_transport="wsl_exe",
+        execution_kind="wsl_printf_probe",
+        wsl_distro=distro,
+        wsl_user=user,
+    )
+
+
+def require_wsl_distro_running(distro: str, wsl_list_text: str) -> None:
+    """Fail closed unless ``wsl -l -v`` shows ``distro`` as Running (never start it)."""
+    from ..discovery import parse_wsl_list_verbose
+
+    rows = parse_wsl_list_verbose(wsl_list_text or "")
+    for row in rows:
+        if row["name"] == distro:
+            if row["state"] == "Running":
+                return
+            raise PlanError(
+                "wsl_distro_not_running",
+                f"distro {distro!r} is {row['state']}; operator must start it (never auto-start)",
+            )
+    raise PlanError("wsl_distro_not_listed", f"distro {distro!r} not in wsl -l -v output")

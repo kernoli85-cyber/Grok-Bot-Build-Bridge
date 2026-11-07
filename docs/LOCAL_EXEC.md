@@ -80,3 +80,28 @@ Uninstall (venv only; does not delete `preferences.json` / `webhook.json`):
 ## Skill vs global install
 
 The draft skill is a **portable recipe** for a parent‑owned private skill evaluation. This PR does **not** call global skill install, AddMcpServer, merge, or publication.
+
+## Execution backend vs plan backend (v0.16.0)
+
+`runner-run` now reports `plan_backend`, `execution_transport`, `execution_kind`.
+
+| transport | meaning |
+|-----------|---------|
+| `wsl_exe` | spawned **inside WSL** via `wsl.exe -d <distro> -u <user> --cd <cwd> --exec ...` |
+| `host_python` / `host_direct_posix` | spawned on the host; a `wsl` plan label here is **not** WSL execution |
+| `host_direct` | native Windows spawn |
+
+On Windows, `--backend wsl` with a non-dummy executable is refused (`wsl_transport_required`)
+instead of silently spawning on the host.
+
+**WSL transport probe** (not Grok, no file writes, fixed argv):
+
+```text
+grok-bot-build-bridge runner-run --state-db <unique temp>.db --task-id <id> \
+  --cwd /home/<user> --wsl-probe --wsl-distro Ubuntu --wsl-user <user> [--execute]
+```
+
+Dry-run by default. With `--execute` it first reads `wsl.exe -l -v` and refuses unless the
+distro is `Running` (never starts it); root refused. Runs `/usr/bin/printf` only;
+`grok_executed=false`. Outbox events are then inspectable with `outbox-pump` (dry-run default).
+Real Grok jobs through `wsl_exe` are a separate future gate.

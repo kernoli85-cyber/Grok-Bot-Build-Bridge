@@ -27,6 +27,9 @@ class RunOutcome:
     argv_preview: tuple[str, ...]
     heartbeats: int = 0
     lease_lost: bool = False
+    plan_backend: str | None = None
+    execution_transport: str | None = None
+    execution_kind: str | None = None
 
 
 def _heartbeat_loop(
@@ -50,7 +53,7 @@ def _heartbeat_loop(
             return
 
 
-def execute_one_shot(
+def _execute_one_shot_inner(
     store: JobStore,
     plan: ApprovedExecutionPlan,
     *,
@@ -314,4 +317,34 @@ def _commit_result(
         note="nonzero_exit_no_auto_requeue; use explicit_retry",
         argv_preview=argv_preview,
         heartbeats=heartbeats,
+    )
+
+
+def execute_one_shot(
+    store: JobStore,
+    plan: ApprovedExecutionPlan,
+    *,
+    owner: str,
+    dry_run: bool = True,
+    executor: Executor = run_argv,
+    lease_sec: float = 300.0,
+    heartbeat_interval_sec: float | None = None,
+) -> RunOutcome:
+    """See _execute_one_shot_inner; adds truthful backend/transport labels."""
+    from dataclasses import replace
+
+    out = _execute_one_shot_inner(
+        store,
+        plan,
+        owner=owner,
+        dry_run=dry_run,
+        executor=executor,
+        lease_sec=lease_sec,
+        heartbeat_interval_sec=heartbeat_interval_sec,
+    )
+    return replace(
+        out,
+        plan_backend=plan.backend,
+        execution_transport=plan.execution_transport,
+        execution_kind=plan.execution_kind,
     )

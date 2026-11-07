@@ -356,6 +356,12 @@ def cmd_outbox_pump(args: argparse.Namespace) -> int:
 def cmd_runner_run(args: argparse.Namespace) -> int:
     """One-shot runner. Dry-run by default; --execute required to spawn a process."""
     store = _store_from_args(args)
+    if args.wsl_probe:
+        return _cmd_runner_wsl_probe(args, store)
+    if not args.executable:
+        json.dump({"error": {"code": "executable_missing", "message": "--executable required (or --wsl-probe)"}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
     try:
         plan = build_approved_plan(
             task_id=args.task_id,
@@ -400,6 +406,10 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
             "stderr_truncated": outcome.stderr_truncated,
             "note": outcome.note,
             "argv_preview": list(outcome.argv_preview),
+            "plan_backend": outcome.plan_backend,
+            "execution_transport": outcome.execution_transport,
+            "execution_kind": outcome.execution_kind,
+            "transport_note": _transport_note(outcome.plan_backend, outcome.execution_transport),
             "heartbeats": outcome.heartbeats,
             "lease_lost": outcome.lease_lost,
             "state_db": str(store.db_path),
@@ -417,6 +427,88 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
     )
     sys.stdout.write("\n")
     return 0
+
+
+def _transport_note(plan_backend: str | None, transport: str | None) -> str:
+    if transport == "wsl_exe":
+        return "executed_inside_wsl_via_wsl_exe"
+    if plan_backend == "wsl":
+        return "plan_backend_wsl_but_spawned_on_host_NOT_wsl_execution"
+    return "spawned_on_host"
+
+
+def _read_wsl_list_text() -> tuple[str | None, str | None]:
+    from .safe_exec import run_argv
+
+    r = run_argv(("wsl.exe", "-l", "-v"), timeout_sec=10)
+    if r.error or r.timed_out:
+        return None, r.error or "timeout"
+    return (r.stdout or "") + "\n" + (r.stderr or ""), None
+
+
+def _cmd_runner_wsl_probe(args: argparse.Namespace, store: JobStore) -> int:
+    """Fixed wsl.exe printf probe: proves WSL transport + job/outbox, NOT Grok."""
+    from .runner.plan import build_wsl_probe_plan, require_wsl_distro_running
+
+    try:
+        plan = build_wsl_probe_plan(
+            task_id=args.task_id,
+            distro=args.wsl_distro or "",
+            user=args.wsl_user or "",
+            cwd=args.cwd,
+            timeout_sec=min(float(args.timeout), 120.0),
+        )
+    except PlanError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    precheck = "skipped_dry_run"
+    if args.execute:
+        text, err = _wsl_list_reader()
+        if err is not None:
+            json.dump({"error": {"code": "wsl_list_failed", "message": err}}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return 2
+        try:
+            require_wsl_distro_running(plan.wsl_distro or "", text or "")
+        except PlanError as exc:
+            json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return 2
+        precheck = "distro_running_confirmed"
+    try:
+        outcome = execute_one_shot(store, plan, owner=args.owner, dry_run=not args.execute)
+    except StoreError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump(
+        {
+            "dry_run": outcome.dry_run,
+            "task_id": outcome.task_id,
+            "status": outcome.status,
+            "returncode": outcome.returncode,
+            "timed_out": outcome.timed_out,
+            "error_code": outcome.error_code,
+            "argv_preview": list(outcome.argv_preview),
+            "plan_backend": outcome.plan_backend,
+            "execution_transport": outcome.execution_transport,
+            "execution_kind": outcome.execution_kind,
+            "transport_note": _transport_note(outcome.plan_backend, outcome.execution_transport),
+            "wsl_precheck": precheck,
+            "grok_executed": False,
+            "note": "wsl_printf_probe proves wsl.exe transport + job/outbox only; NOT a Grok run",
+            "state_db": str(store.db_path),
+        },
+        sys.stdout,
+        indent=2,
+    )
+    sys.stdout.write("\n")
+    return 0 if outcome.status in {"dry_run", "succeeded"} else 1
+
+
+# Indirection for tests (monkeypatch) - never starts a distro.
+_wsl_list_reader = _read_wsl_list_text
 
 
 def cmd_jobs_retry(args: argparse.Namespace) -> int:
@@ -835,7 +927,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--task-id", required=True)
     p_run.add_argument("--backend", choices=["native", "wsl"], default="wsl")
     p_run.add_argument("--cwd", required=True)
-    p_run.add_argument("--executable", required=True, help="Resolved grok or bridge-dummy path")
+    p_run.add_argument("--executable", default=None, help="Resolved grok or bridge-dummy path")
+    p_run.add_argument("--wsl-probe", action="store_true", help="Fixed /usr/bin/printf inside a RUNNING distro via wsl.exe (transport proof, not Grok)")
+    p_run.add_argument("--wsl-distro", default=None)
+    p_run.add_argument("--wsl-user", default=None)
     p_run.add_argument("--owner", default="local-worker")
     p_run.add_argument("--timeout", type=float, default=30.0)
     p_run.add_argument("--lease-sec", type=float, default=300.0)
