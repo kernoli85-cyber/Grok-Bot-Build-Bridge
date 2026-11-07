@@ -1,0 +1,27 @@
+{
+  "_fixture_note": "Derived from ONE observed grok 1.0.77 headless json result (2026-11-07, -m LM-Studio, local LM Studio). Field names, nesting and numbers as observed; sessionId, requestId, cwd and thought text REPLACED with placeholders. Not a raw capture.",
+  "text": "LOCAL_BRIDGE_OK",
+  "stopReason": "end_turn",
+  "sessionId": "00000000-0000-0000-0000-000000000001",
+  "requestId": "00000000-0000-0000-0000-000000000002",
+  "cwd": "/tmp/gbbb-ask-PlaceholderDir",
+  "thought": "placeholder reasoning text",
+  "usage": {
+    "input_tokens": 9299,
+    "cache_read_input_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "output_tokens": 29,
+    "reasoning_tokens": 21,
+    "total_tokens": 9328
+  },
+  "num_turns": 1,
+  "modelUsage": {
+    "qwen3.5-9b-mtp": {
+      "inputTokens": 9299,
+      "outputTokens": 29,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "modelCalls": 1
+    }
+  }
+}

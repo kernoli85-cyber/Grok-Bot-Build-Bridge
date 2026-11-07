@@ -201,3 +201,44 @@ def model_identity(model_usage: Any, expected: tuple[str, ...] | None) -> str:
     if len(keys) > 32 or not all(isinstance(k, str) and MODEL_ID_RE.match(k) for k in keys):
         return "mismatch"
     return "confirmed" if set(keys) <= set(expected) else "mismatch"
+
+
+def usage_keys_from_result(raw: bytes) -> list[str]:
+    """Read ONLY the modelUsage keys from an owner-supplied grok json result (bounded).
+
+    Nothing else (text, thought, session ids, cwd) is returned or kept. The keys are what
+    Grok reports for the main model calls; side-model calls are not included (docs)."""
+    from decimal import Decimal
+    if len(raw) > 64 * 1024:
+        raise ModelSelectionError("result_too_large", "result file exceeds 64 KiB")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise ModelSelectionError("result_invalid", "result is not UTF-8") from None
+
+    def _no_dupes(pairs):
+        d = {}
+        for k, v in pairs:
+            if k in d:
+                raise ValueError("duplicate key")
+            d[k] = v
+        return d
+    try:
+        obj = json.loads(text, object_pairs_hook=_no_dupes, parse_float=Decimal,
+                         parse_constant=lambda _c: None)
+    except (ValueError, RecursionError):
+        raise ModelSelectionError("result_invalid", "result is not a single JSON object") from None
+    if not isinstance(obj, dict):
+        raise ModelSelectionError("result_invalid", "result is not a JSON object")
+    mu = obj.get("modelUsage")
+    if not isinstance(mu, dict) or not mu:
+        raise ModelSelectionError("model_usage_absent", "result reports no modelUsage; identity unknown")
+    if len(mu) > 32:
+        raise ModelSelectionError("model_usage_invalid", "too many modelUsage entries")
+    keys = []
+    for k in mu:
+        try:
+            keys.append(validate_model_id(k))
+        except ModelSelectionError:
+            raise ModelSelectionError("model_usage_invalid", "modelUsage key is not a safe model id") from None
+    return sorted(keys)

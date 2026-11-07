@@ -731,6 +731,45 @@ def cmd_model_settings(args: argparse.Namespace) -> int:
             al = {k: v for k, v in s.aliases.items() if k not in clash}
             al[a.name] = a
             s = _r(s, aliases=al)
+        elif args.ms_cmd == "check-result":
+            from .model_select import model_identity, resolve_model, usage_keys_from_result
+            alias = s.aliases.get(args.name)
+            if alias is None:
+                raise ModelSelectionError("alias_unknown", "register the alias first (add-alias)")
+            try:
+                with open(args.result_file, "rb") as f:
+                    raw = f.read(64 * 1024 + 1)
+            except OSError:
+                raise ModelSelectionError("result_file_unreadable", "cannot read result file") from None
+            keys = usage_keys_from_result(raw)
+            choice = resolve_model(args.name, s)
+            status = model_identity({k: {} for k in keys}, choice.expect_usage_keys)
+            report = {
+                "alias": alias.name, "reported_model_usage_keys": keys,
+                "currently_expected": list(choice.expect_usage_keys),
+                "identity_with_current_settings": status,
+                "note": ("modelUsage is Grok's report of the main model calls, not proof of a local "
+                         "route; side-model calls are not listed. Changing the model loaded in your "
+                         "provider changes this id and needs an explicit update."),
+            }
+            if args.set_usage_key is None:
+                report["saved"] = False
+                if status != "confirmed" and len(keys) == 1:
+                    report["to_accept_run"] = (f"model-settings check-result {alias.name} --result-file <file> "
+                                               f"--set-usage-key {keys[0]}")
+                json.dump(report, sys.stdout, indent=2)
+                sys.stdout.write("\n")
+                return 0 if status == "confirmed" else 3
+            if args.set_usage_key not in keys:
+                raise ModelSelectionError("usage_key_not_observed", "--set-usage-key must equal a reported modelUsage key")
+            if len(keys) != 1:
+                raise ModelSelectionError("multiple_models_reported", "result reports several models; set keys with add-alias --replace")
+            s = _r(s, aliases={**s.aliases, alias.name: _r(alias, expect_usage_keys=(args.set_usage_key,))})
+            save_settings(s, path)
+            report.update(saved=True, now_expected=[alias.name, args.set_usage_key])
+            json.dump(report, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+            return 0
         elif args.ms_cmd == "remove-alias":
             if args.name not in s.aliases:
                 raise ModelSelectionError("alias_unknown", "no such alias")
@@ -788,8 +827,12 @@ def cmd_ask(args: argparse.Namespace) -> int:
         "prompt_transport": "argv value of --single (grok headless does not read stdin as prompt)",
         "prompt_process_visibility": "VISIBLE in OS process listings (wsl.exe command line, /proc cmdline) while running; preview redaction only hides it from bridge output",
         "max_turns": plan.max_turns, "max_turns_is_cost_cap": False, "cost_cap_flag": None,
-        "timeout_sec": plan.timeout_sec,
-        "timeout": "kills host wsl.exe; guest cleanup not proven -> needs_review, no retry",
+        "timeout_sec": timeout,
+        "guest_timeout": "coreutils timeout inside WSL stops grok after timeout_sec (KILL 10 s later)",
+        "host_deadline_sec": plan.timeout_sec,
+        "timeout": "a timeout is needs_review with no retry; if the host deadline hits, guest cleanup is not proven",
+        "secondary_features_disabled_env": ["GROK_TURN_SUMMARY", "GROK_SESSION_RECAP", "GROK_TITLE_REFRESH", "GROK_PROMPT_SUGGESTIONS"],
+        "side_models": "documented side-model calls (e.g. initial session title) may still happen, are not in modelUsage and cannot be switched off per run",
         "tools": "builtin tools denied + deny rules incl MCPTool + dontAsk + strict sandbox (docs semantics, unverified on 1.0.70)",
         "not_isolated": "user ~/.grok config and native MCP servers may still load; trust state of the fresh cwd unknown",
         "approval": "--allow-model-call is a technical gate only; it does not replace the owner's explicit permission",
@@ -800,7 +843,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
             f"Dry run only: nothing was sent to Grok and nothing was written. "
             f"The prompt has {info['prompt_bytes']} bytes and would run in a fresh /tmp/gbbb-ask-* "
             f"directory inside WSL distro {plan.wsl_distro} as {plan.wsl_user}, with at most "
-            f"{plan.max_turns} turn(s) and a {plan.timeout_sec:g} s timeout. "
+            f"{plan.max_turns} turn(s) and a {timeout:g} s timeout. "
             + (f"Model {choice.model_id} ({choice.source.replace('_', ' ')}) would be passed with --model; "
                "the bridge has not checked that it exists, and the run only counts as done if Grok "
                "reports that model was used. "
@@ -840,7 +883,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     from dataclasses import replace as _r
     plan = build_wsl_grok_ask_plan(
         task_id=task_id, distro=plan.wsl_distro, user=plan.wsl_user, grok_path=plan.executable,
-        cwd=cwd, prompt=prompt, max_turns=plan.max_turns, timeout_sec=plan.timeout_sec,
+        cwd=cwd, prompt=prompt, max_turns=plan.max_turns, timeout_sec=timeout,
         model=choice)
     plan = _r(plan, return_answer=bool(args.show_answer))
     store = _store_from_args(args)
@@ -1384,6 +1427,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="modelUsage key Grok reports for it (e.g. the provider model id); repeatable")
     p_aa.add_argument("--timeout-sec", type=float, default=None)
     p_aa.add_argument("--replace", action="store_true")
+    p_cr = ms_sub.add_parser("check-result", help="Compare a saved grok json result's modelUsage keys with an alias (no Grok call)")
+    p_cr.add_argument("name")
+    p_cr.add_argument("--result-file", required=True)
+    p_cr.add_argument("--set-usage-key", default=None,
+                      help="Explicitly REPLACE the alias's expected keys with this one observed key")
     p_ra = ms_sub.add_parser("remove-alias")
     p_ra.add_argument("name")
     p_ms.set_defaults(func=cmd_model_settings)

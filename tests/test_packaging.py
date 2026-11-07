@@ -268,6 +268,14 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     d = json.loads(r.stdout)
     assert r.returncode == 0 and d["dry_run"] is True and d["limits"]["model"]["source"] == "owner_preference"
     assert d["argv_preview"][d["argv_preview"].index("--model") + 1] == "LM-Studio"
+    fx = ROOT / "tests" / "fixtures" / "grok_json_1077_local_observed_redacted.json"
+    r = cli("model-settings", "--settings", str(ms), "check-result", "LM-Studio", "--result-file", str(fx))
+    assert r.returncode == 3 and json.loads(r.stdout)["reported_model_usage_keys"] == ["qwen3.5-9b-mtp"]
+    r = cli("model-settings", "--settings", str(ms), "check-result", "LM-Studio", "--result-file", str(fx),
+            "--set-usage-key", "qwen3.5-9b-mtp")
+    assert r.returncode == 0 and json.loads(r.stdout)["saved"] is True
+    r = cli("model-settings", "--settings", str(ms), "check-result", "LM-Studio", "--result-file", str(fx))
+    assert r.returncode == 0 and json.loads(r.stdout)["identity_with_current_settings"] == "confirmed"
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

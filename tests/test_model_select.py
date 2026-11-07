@@ -97,7 +97,8 @@ def test_plan_passes_model_verbatim_and_keeps_isolation():
 
 def test_timeout_ceiling_only_raised_for_local_alias():
     loc = M.resolve_model("LM-Studio", M.ModelSettings(None, {"LM-Studio": M.ModelAlias("LM-Studio")}))
-    assert _plan(loc, 1800.0).timeout_sec == 1800.0
+    pl = _plan(loc, 1800.0)
+    assert pl.timeout_sec == 1830.0 and pl.argv[pl.argv.index('/usr/bin/timeout') + 3] == '1800'
     for c in (None, M.resolve_model("grok-4.6", M.ModelSettings())):
         with pytest.raises(P.PlanError):
             _plan(c, 900.0)

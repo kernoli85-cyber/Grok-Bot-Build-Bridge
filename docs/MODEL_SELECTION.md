@@ -57,3 +57,60 @@ None of this has been checked against the installed 1.0.70 `--help`.
 3. The `modelUsage` key used for a custom LM Studio model, which sets the right
    `--expect-usage-key`.
 4. Whether a local endpoint is reached without any cloud call. The bridge cannot observe this.
+
+## v0.25.0: first real observation, plus explicit identity onboarding
+
+### What was observed (one approved run, 2026-11-07 ~12:50 CET)
+- WSL Grok is **1.0.77** (`grok --version`). Earlier notes say 1.0.70; that was the version at
+  the time, and they are kept as history. `grok --help` on 1.0.77 lists `-m, --model <MODEL>`.
+- The owner's catalog key is `LM-Studio` (owner-supplied, exact case). One headless run used
+  `--model LM-Studio --output-format json --max-turns 1`, strict sandbox, `dontAsk`, every tool
+  denied, the env switches below, and `/usr/bin/timeout 900` inside WSL. It finished after ~20 s.
+- Result: `text` `LOCAL_BRIDGE_OK`, `stopReason` `end_turn`, `num_turns` 1, **no `is_error` field**,
+  **no cost fields** (cost unknown, not zero). Tokens: input 9299, output 29, reasoning 21,
+  total 9328. Here `total = input + output`, so reasoning is counted inside output; the bridge
+  stores what Grok reports and never re-adds reasoning.
+- `modelUsage` is keyed by the **provider model id** `qwen3.5-9b-mtp`, **not** the catalog key `LM-Studio`.
+- The owner saw the request in the LM Studio server debug window. That backs up that the main
+  request was processed locally. It does **not** prove that no side-model call happened
+  (session title etc.), and it proves nothing about tool isolation (the tool canary is untested).
+- No bridge was installed on the host for this run. The Windows companion there is still 0.16.2,
+  and no host setting was changed.
+- `tests/fixtures/grok_json_1077_local_observed_redacted.json` keeps the observed field names,
+  nesting and numbers. Session and request ids, cwd and thought text are replaced placeholders.
+  It is a derived fixture, not a raw capture.
+
+### Explicit identity onboarding (no auto-trust)
+The bridge never hardcodes `LM-Studio -> qwen...`. Each user declares their own key:
+
+```
+grok-bot-build-bridge model-settings add-alias LM-Studio --expect-usage-key qwen3.5-9b-mtp
+# or learn it from a saved result file explicitly:
+grok-bot-build-bridge model-settings check-result LM-Studio --result-file result.json          # dry run, exit 3 if not confirmed
+grok-bot-build-bridge model-settings check-result LM-Studio --result-file result.json --set-usage-key qwen3.5-9b-mtp
+```
+
+- `check-result` reads only the `modelUsage` keys, bounded to 64 KiB with strict JSON and no
+  duplicate keys. It never prints the answer, the thought, session ids or the cwd.
+- Saving needs `--set-usage-key` equal to the single reported key. A result that reports several
+  models is refused (use `add-alias --replace`). Saving replaces the expected keys rather than
+  adding to them.
+- If you load a different model in LM Studio, the reported id changes. Runs then become
+  `model_identity_mismatch` (needs_review) until you update the key explicitly.
+- `modelUsage` is Grok's report of the main model calls. It does not prove a local route, and
+  side-model calls are not listed.
+
+### `ask` plan additions (used in the observed run)
+- Env `GROK_TURN_SUMMARY=false GROK_SESSION_RECAP=false GROK_TITLE_REFRESH=false GROK_PROMPT_SUGGESTIONS=false`
+  (all documented in 26-config-reference). These only switch features off. The initial
+  title has no documented switch.
+- Guest deadline `/usr/bin/timeout -k 10 <timeout_sec>` inside WSL. The host deadline is
+  `timeout_sec + 30 s`, so the guest normally stops grok first. A host-side kill is still
+  `timeout_uncertain`: needs_review, no retry.
+- The success rules are unchanged. Success needs exit 0, a valid JSON result, `end_turn`, no
+  `is_error: true` and, with `--model`, `model_identity == confirmed`. An absent `is_error` counts
+  as "not reported", which is fine. Exit 0 alone is never success.
+
+### Still unproven
+Tool isolation (canary), the absence of side-model or cloud calls, unknown-id behaviour,
+installation of the bridge inside WSL, and distribution of an installable app.

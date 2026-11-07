@@ -490,6 +490,23 @@ def validate_ask_prompt(prompt: str | bytes) -> str:
     return p
 
 
+# Documented env switches (docs 26-config-reference) that only DISABLE secondary features.
+# They do not prove no side-model call happens (initial title generation has no documented
+# switch). Used in the one observed 1.0.77 local run.
+ASK_EXTRA_ENV = (
+    "GROK_TURN_SUMMARY=false",
+    "GROK_SESSION_RECAP=false",
+    "GROK_TITLE_REFRESH=false",
+    "GROK_PROMPT_SUGGESTIONS=false",
+)
+# Guest-side deadline: coreutils timeout inside WSL terminates grok there (TERM, KILL after
+# ASK_GUEST_KILL_GRACE). The host deadline is longer, so normally the guest stops first;
+# a host-side kill still yields timeout_uncertain / needs_review, never a retry.
+ASK_GUEST_TIMEOUT = "/usr/bin/timeout"
+ASK_GUEST_KILL_GRACE = 10
+ASK_HOST_DEADLINE_MARGIN = 20.0
+
+
 def build_wsl_grok_ask_plan(
     *,
     task_id: str,
@@ -533,14 +550,16 @@ def build_wsl_grok_ask_plan(
     deny: list[str] = []
     for r in GROK_SMOKE_DENY_RULES:
         deny += ["--deny", r]
+    guest = str(int(t)) if float(int(t)) == t else f"{t:g}"
     head = ("wsl.exe", "-d", smoke.wsl_distro, "-u", smoke.wsl_user, "--cd", c,
-            "--exec", "/usr/bin/env", *GROK_SMOKE_ENV, smoke.executable)
+            "--exec", ASK_GUEST_TIMEOUT, "-k", str(ASK_GUEST_KILL_GRACE), guest,
+            "/usr/bin/env", *GROK_SMOKE_ENV, *ASK_EXTRA_ENV, smoke.executable)
     tail = ("--cwd", c, *model_flags, *flags, *deny)
     _reject_forbidden(head + tail)  # prompt is a value, not a flag; checked separately
     argv = (*head, "--single", p, *tail)
     return ApprovedExecutionPlan(
         task_id=smoke.task_id, backend="wsl", cwd=c, executable=smoke.executable, argv=argv,
-        timeout_sec=t, max_turns=max_turns, permission_mode="dontAsk",
+        timeout_sec=t + ASK_GUEST_KILL_GRACE + ASK_HOST_DEADLINE_MARGIN, max_turns=max_turns, permission_mode="dontAsk",
         allow_rules=(), deny_rules=GROK_SMOKE_DENY_RULES, stdin_bytes=None,
         env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": smoke.task_id},
         prompt_via_stdin=False, force_prompt_argv=True,
