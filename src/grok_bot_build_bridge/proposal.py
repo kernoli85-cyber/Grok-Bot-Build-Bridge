@@ -438,17 +438,27 @@ def parse_proposal(text: str, selection: list[str], *, fmt: str, nonce: str) -> 
     raise ProposalError("proposal_wrong_schema", "replacement format is not supported")
 
 
-def proposal_token(key: bytes, selection: list[str], bases: dict[str, str], proposed: dict[str, str],
-                   *, fmt: str = "json-v1") -> str:
+def proposal_binding_token(key: bytes, *, fmt: str, selection: list[str], base_sha256: list[str],
+                           proposed_sha256: list[str]) -> str:
+    """HMAC over the reviewed base and replacement hashes. Not an apply authorization."""
     body = {
         "schema": "gbbb.proposal_bind/v1",
         "format": fmt,
         "selection": list(selection),
-        "base_sha256": [hashlib.sha256(bases[path].encode()).hexdigest() for path in selection],
-        "proposed_sha256": [hashlib.sha256(proposed[path].encode()).hexdigest() for path in selection],
+        "base_sha256": list(base_sha256),
+        "proposed_sha256": list(proposed_sha256),
     }
     payload = json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
     return hmac.new(key, b"proposal\x00" + payload, hashlib.sha256).hexdigest()[:32]
+
+
+def proposal_token(key: bytes, selection: list[str], bases: dict[str, str], proposed: dict[str, str],
+                   *, fmt: str = "json-v1") -> str:
+    return proposal_binding_token(
+        key, fmt=fmt, selection=selection,
+        base_sha256=[hashlib.sha256(bases[path].encode()).hexdigest() for path in selection],
+        proposed_sha256=[hashlib.sha256(proposed[path].encode()).hexdigest() for path in selection],
+    )
 
 
 def review(selection: list[str], bases: dict[str, str], proposed: dict[str, str], key: bytes, *,

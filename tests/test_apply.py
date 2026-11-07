@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
 
 import pytest
@@ -66,6 +67,7 @@ def test_preview_then_confirm_preserves_mode_and_reports_write(monkeypatch, tmp_
     code, preview = _run(_body(src, content), capsys)
     blob = json.dumps(preview)
     assert code == 0 and preview["mode"] == "preview" and preview["source_writes"] is False
+    assert preview["lineage"] == "direct"
     assert preview["applied"] is False and preview["model_call"] is False and preview["retry"] is False
     assert preview["stored"] is False and preview["proposal_saved"] is False
     assert MARKER not in blob and "return a" not in blob and str(src) not in blob
@@ -243,6 +245,7 @@ def test_return_replacement_is_opt_in_and_not_an_apply_token(monkeypatch, tmp_pa
     sent = dict(flagged, execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
     code, done = _run(sent, capsys)
     assert code == 0 and done["proposal"]["replacement"]["files"][0]["content"] == "beta\n"
+    assert done["proposal"]["base_sha256"] == hashlib.sha256(before).hexdigest()
     assert path.read_bytes() == before
     stolen = _body(src, "beta\n", confirm_apply=done["proposal"]["proposal_token"],
                    base_sha256=hashlib.sha256(before).hexdigest())
@@ -251,3 +254,72 @@ def test_return_replacement_is_opt_in_and_not_an_apply_token(monkeypatch, tmp_pa
     many = dict(base, files=["notes/a.txt", "notes/b.txt"], return_replacement=True)
     code, err = _run(many, capsys)
     assert code == 2 and err["error"]["code"] == "field_invalid"
+
+
+def test_reviewed_proposal_refuses_a_changed_base_before_preview(monkeypatch, tmp_path, capsys):
+    _env(monkeypatch, tmp_path)
+    src, path = _tree(tmp_path, "alpha\n")
+    before = path.read_bytes()
+    owner = os.stat(path).st_uid
+    bindir = tmp_path / "bin"
+    bindir.mkdir(mode=0o755)
+    dummy = bindir / "grok"
+    replacement = json.dumps({"schema": "gbbb.file_replacements/v1",
+                              "files": [{"path": "notes/a.txt", "content": "beta\n"}]})
+    dummy.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
+                     "assert '--sandbox' in sys.argv\n"
+                     "print(json.dumps(" + json.dumps({
+                         "text": replacement, "stopReason": "end_turn", "num_turns": 1,
+                         "usage": {"input_tokens": 1, "output_tokens": 1},
+                         "modelUsage": {"provider-model-id": {}},
+                     }) + "))\n")
+    dummy.chmod(0o755)
+    propose = {
+        "schema": "gbbb.invoke/v1", "op": "propose", "executable": str(dummy), "model": dict(MODEL),
+        "source": str(src), "files": ["notes/a.txt"], "instruction": "Use beta.",
+        "return_replacement": True,
+    }
+    code, dry = _run(propose, capsys)
+    sent = dict(propose, execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
+    code, done = _run(sent, capsys)
+    assert code == 0 and done["proposal"]["base_sha256"] == hashlib.sha256(before).hexdigest()
+    reviewed = done["proposal"]["replacement"]
+    token = done["proposal"]["proposal_token"]
+    path.write_text("newer\n")
+    stale = _body(src, "beta\n", replacement=reviewed, base_sha256=done["proposal"]["base_sha256"],
+                  proposal_token=token, replacement_format="json-v1")
+    code, err = _run(stale, capsys)
+    assert code == 2 and err["error"]["code"] == "proposal_base_changed"
+    assert "apply_token" not in err and path.read_text() == "newer\n"
+    rebased = dict(stale, base_sha256=hashlib.sha256(b"newer\n").hexdigest())
+    code, err = _run(rebased, capsys)
+    assert code == 2 and err["error"]["code"] == "proposal_mismatch" and path.read_text() == "newer\n"
+    direct = _body(src, "beta\n")
+    code, preview = _run(direct, capsys)
+    assert code == 0 and preview["lineage"] == "direct" and preview["source_writes"] is False
+    assert path.read_text() == "newer\n"
+    path.write_text("alpha\n")
+    fresh = _body(src, "beta\n", replacement=reviewed, base_sha256=done["proposal"]["base_sha256"],
+                  proposal_token=token, replacement_format="json-v1")
+    code, preview = _run(fresh, capsys)
+    assert code == 0 and preview["lineage"] == "proposal" and preview["source_writes"] is False
+    stolen = dict(fresh, confirm_apply=token)
+    code, err = _run(stolen, capsys)
+    assert code == 2 and err["error"]["code"] == "consent_mismatch" and path.read_bytes() == before
+    fresh["confirm_apply"] = preview["apply_token"]
+    code, applied = _run(fresh, capsys)
+    assert code == 0 and applied["source_writes"] is True and applied["applied"] is True
+    assert path.read_text() == "beta\n" and os.stat(path).st_uid == owner
+    os.chmod(path, 0o755)
+    mode = os.stat(path).st_mode
+    again = _body(src, "gamma\n")
+    code, preview = _run(again, capsys)
+    again.update(base_sha256=preview["base_sha256"], confirm_apply=preview["apply_token"])
+    code, applied = _run(again, capsys)
+    assert code == 0 and os.stat(path).st_mode == mode and os.stat(path).st_uid == owner
+    os.chmod(path, 0o644)
+    os.chmod(path, stat.S_ISUID | 0o644)
+    if os.stat(path).st_mode & stat.S_ISUID:
+        code, err = _run(_body(src, "delta\n"), capsys)
+        assert code == 2 and err["error"]["code"] == "special_mode"
+        assert path.read_text() == "gamma\n"

@@ -64,10 +64,14 @@ class _Opened:
     parents: tuple[tuple[int, int], ...]
 
 
-def apply_token(key: bytes, opened: _Opened, replacement: str, *, show_diff: bool) -> str:
+def apply_token(key: bytes, opened: _Opened, replacement: str, *, show_diff: bool,
+                lineage: str, proposal_token: str = "", replacement_format: str = "") -> str:
     body = {
         "schema": "gbbb.apply_bind/v1",
         "op": "apply",
+        "lineage": lineage,
+        "proposal_token": proposal_token,
+        "replacement_format": replacement_format,
         "source": opened.source,
         "file": opened.file,
         "dev": opened.dev,
@@ -226,7 +230,8 @@ def _diff(path: str, base: str, replacement: str) -> str:
         fromfile=path, tofile=path))
 
 
-def _common(opened: _Opened, replacement: str, *, show_diff: bool, key: bytes) -> dict[str, Any]:
+def _common(opened: _Opened, replacement: str, *, show_diff: bool, key: bytes,
+            lineage: str, proposal_token: str, replacement_format: str) -> dict[str, Any]:
     body: dict[str, Any] = {
         "schema": "gbbb.invoke/v1",
         "op": "apply",
@@ -239,13 +244,16 @@ def _common(opened: _Opened, replacement: str, *, show_diff: bool, key: bytes) -
         "mcp": False,
         "proposal_saved": False,
         "file": opened.file,
+        "lineage": lineage,
         "base_sha256": hashlib.sha256(opened.data).hexdigest(),
         "changed": opened.text != replacement,
         "limits": dict(_LIMITS),
     }
     if show_diff:
         body["diff"] = _diff(opened.file, opened.text, replacement)
-    body["apply_token"] = apply_token(key, opened, replacement, show_diff=show_diff)
+    body["apply_token"] = apply_token(
+        key, opened, replacement, show_diff=show_diff, lineage=lineage,
+        proposal_token=proposal_token, replacement_format=replacement_format)
     return body
 
 
@@ -297,7 +305,9 @@ def _replace(opened: _Opened, replacement: str, hook: _HOOK | None) -> dict[str,
             view = view[wrote:]
         os.fchmod(temp_fd, opened.mode)
         st = os.fstat(temp_fd)
-        if st.st_nlink != 1 or st.st_uid != uid or stat.S_IMODE(st.st_mode) != opened.mode or st.st_size != len(payload):
+        if st.st_uid != opened.uid:
+            raise ApplyError("owner_not_preserved", "this process cannot create the replacement as the file owner")
+        if st.st_nlink != 1 or stat.S_IMODE(st.st_mode) != opened.mode or st.st_size != len(payload):
             raise ApplyError("temp_untrusted", "temporary file failed its own check")
         os.fsync(temp_fd)
         if hook:
@@ -336,27 +346,63 @@ def _replace(opened: _Opened, replacement: str, hook: _HOOK | None) -> dict[str,
         os.close(root)
 
 
+def _proposal_lineage(key: bytes, *, file: str, replacement: str, base_sha256: str | None,
+                      proposal_token: str | None, replacement_format: str | None) -> tuple[str, str, str]:
+    """Return lineage, proposal token, and format. A proposal token is not write permission."""
+    if not proposal_token:
+        if replacement_format:
+            raise ApplyError("field_invalid", "replacement_format requires proposal_token")
+        return "direct", "", ""
+    if not replacement_format or not base_sha256:
+        raise ApplyError("field_invalid", "proposal lineage requires base_sha256 and replacement_format")
+    from .proposal import FORMATS, proposal_binding_token
+    if replacement_format not in FORMATS:
+        raise ApplyError("field_invalid", "replacement_format is not a known proposal format")
+    expected = proposal_binding_token(
+        key, fmt=replacement_format, selection=[file], base_sha256=[base_sha256],
+        proposed_sha256=[hashlib.sha256(replacement.encode()).hexdigest()])
+    if not hmac.compare_digest(proposal_token, expected):
+        raise ApplyError("proposal_mismatch", "proposal token does not bind this path, base, and replacement")
+    return "proposal", proposal_token, replacement_format
+
+
 def run_apply(*, source: str, file: str, replacement: str, key: bytes, show_diff: bool = False,
               base_sha256: str | None = None, confirm_apply: str | None = None,
+              proposal_token: str | None = None, replacement_format: str | None = None,
               hook: _HOOK | None = None) -> tuple[dict[str, Any], int]:
-    """Preview when confirm_apply is absent. Write only when the token matches."""
+    """Preview when confirm_apply is absent. Write only when the apply token matches.
+
+    Proposal lineage checks the reviewed base before any preview token is issued.
+    Direct lineage does not claim that binding. Neither path treats proposal_token
+    as permission to write.
+    """
+    lineage, bound_token, bound_format = _proposal_lineage(
+        key, file=file, replacement=replacement, base_sha256=base_sha256,
+        proposal_token=proposal_token, replacement_format=replacement_format)
     opened = _open_target(source, file)
+    if lineage == "proposal" and opened.file != file:
+        raise ApplyError("proposal_mismatch", "proposal token does not bind this path, base, and replacement")
     if confirm_apply is not None and not base_sha256:
         raise ApplyError("field_invalid", "confirm_apply requires base_sha256 from the preview")
     actual = hashlib.sha256(opened.data).hexdigest()
+    if lineage == "proposal" and actual != base_sha256:
+        raise ApplyError("proposal_base_changed", "file changed since the reviewed proposal")
     if base_sha256 is not None and base_sha256 != actual:
         raise ApplyError("base_changed", "file bytes do not match base_sha256")
+    fields = dict(show_diff=show_diff, key=key, lineage=lineage, proposal_token=bound_token,
+                  replacement_format=bound_format)
     if confirm_apply is None:
-        body = _common(opened, replacement, show_diff=show_diff, key=key)
+        body = _common(opened, replacement, **fields)
         body.update(mode="preview", applied=False, source_writes=False)
         return body, 0
     if not isinstance(confirm_apply, str) or not confirm_apply:
         raise ApplyError("field_invalid", "confirm_apply must be the preview token")
-    expected = apply_token(key, opened, replacement, show_diff=show_diff)
+    expected = apply_token(key, opened, replacement, show_diff=show_diff, lineage=lineage,
+                           proposal_token=bound_token, replacement_format=bound_format)
     if not hmac.compare_digest(confirm_apply, expected):
         raise ApplyError("consent_mismatch", "token does not match this file, path, and replacement")
     if opened.text == replacement:
-        body = _common(opened, replacement, show_diff=show_diff, key=key)
+        body = _common(opened, replacement, **fields)
         body.update(mode="apply", applied=False, source_writes=False, status="unchanged", durable=None)
         return body, 0
     try:
@@ -365,7 +411,7 @@ def run_apply(*, source: str, file: str, replacement: str, key: bytes, show_diff
         raise
     except OSError:
         raise ApplyError("io_error", "unexpected OSError (details withheld: may contain paths)") from None
-    body = _common(opened, replacement, show_diff=show_diff, key=key)
+    body = _common(opened, replacement, **fields)
     body.update(mode="apply", source_writes=True, durable=outcome["durable"],
                 applied=bool(outcome["verified"]),
                 status="applied" if outcome["verified"] else "apply_unverified")

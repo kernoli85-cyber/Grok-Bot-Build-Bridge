@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.35.0-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.35.1-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -118,19 +118,23 @@ Dry-run fields include `proposal_only: true`, `applied: false`, and `source_writ
 
 Tools stay denied, the sandbox stays strict, and the working directory is a fresh `/tmp/gbbb-ask-<hex>` directory that is removed if empty. A guest timeout is not a retry.
 
-`return_replacement: true` is allowed only when `files` has exactly one path. Set it on the dry-run and the execute call; the consent token binds it. After an accepted proposal, the response then includes `proposal.replacement`, the same object apply expects. It is not stored. Without the flag, the response has no replacement bytes. A proposal token is not an apply token.
+`return_replacement: true` is allowed only when `files` has exactly one path. Set it on the dry-run and the execute call; the consent token binds it. After an accepted proposal, the response then includes `proposal.base_sha256` (the file bytes the model was shown) and `proposal.replacement` (the reviewed text). It is not stored. Without the flag, the response has neither. `proposal_token` binds that pair. It is not an apply token and it does not authorize a write.
 
 ## Apply (`op: apply`) — one existing file, no model
 
 `apply` is a separate operation. It has no `executable`, `model`, `execute`, or `confirm_send`. Unknown fields are rejected. The envelope carries `source`, `file` (one relative path), and `replacement` (`gbbb.file_replacements/v1` with that one path). The bridge re-reads the file. It does not call a model, does not use a proposal token as permission, and does not save the proposal.
 
-A request without `confirm_apply` is a preview. It returns `apply_token`, `base_sha256`, `source_writes: false`, and `applied: false`. `show_diff: true` adds a unified diff and is bound into the token. The default preview has no file text.
+A request without `confirm_apply` is a preview. It returns `apply_token`, `base_sha256`, `lineage`, `source_writes: false`, and `applied: false`. `show_diff: true` adds a unified diff and is bound into the token. The default preview has no file text.
 
-The write request repeats the same source, file, replacement, and `show_diff`, plus `base_sha256` and `confirm_apply` from that preview. The token is an HMAC of the consent key over the operation, source path, directory identity, file device, inode, mode, owner, base bytes, and replacement bytes. A changed file is `base_changed` and is not written. A wrong token is `consent_mismatch` and is not written. The same bytes are `status: unchanged` and are not rewritten.
+`lineage: "proposal"` requires `base_sha256`, `proposal_token`, and `replacement_format` copied from the accepted proposal. The bridge checks that HMAC against the path, the claimed base hash, and the replacement bytes. A hash computed from a newer file does not match that token (`proposal_mismatch`). If the token matches and the file bytes differ from that base, the preview is `proposal_base_changed` and no apply token is issued. `lineage: "direct"` is a manually supplied replacement. It does not claim the text was reviewed against an earlier base. Omitting `proposal_token` is that direct path, even if the text once came from a model.
 
-On success, `source_writes` is true and `applied` is true. `durable` is `fsynced` when the parent directory fsync succeeded, or `directory_fsync_unsupported` when the platform refused that fsync. This is one `rename` of a temporary file in the same directory onto the existing name. The previous mode bits are copied, except setuid, setgid, and sticky files, which are refused. Owner is unchanged because the caller must already own the file. There is no backup and no rollback. If the process is killed after creating `.gbbb-apply-<hex>.tmp` and before the rename, that temporary file can remain; this process deletes only a temp it still owns. A same-user swap between the last stat and the rename cannot be prevented. A post-rename check that fails returns exit 3 with `source_writes: true`, `applied: false`, and `apply_unverified`, and does not try to put the old bytes back.
+The write request repeats the preview, including lineage fields, plus `confirm_apply`. The apply token is a separate HMAC over the operation, lineage, proposal token, source path, directory identity, file device, inode, mode, owner, current base bytes, and replacement bytes. `proposal_token` alone is not accepted as `confirm_apply`. A changed file on the direct path is `base_changed` and is not written. A wrong apply token is `consent_mismatch` and is not written. The same bytes are `status: unchanged` and are not rewritten.
+
+On success, `source_writes` is true and `applied` is true. `durable` is `fsynced` when the parent directory fsync succeeded, or `directory_fsync_unsupported` when the platform refused that fsync. This is one `rename` of a temporary file in the same directory onto the existing name. Permission bits other than setuid, setgid, and sticky are copied onto the temporary inode before the rename. Those special bits are refused and the file is left unchanged. The caller must already own the file. The temporary inode is created as the current user; if its uid is not the file owner's uid, the temporary file is removed and the target is not replaced (`owner_not_preserved`). Group ownership is not a claimed invariant. There is no backup and no rollback. If the process is killed after creating `.gbbb-apply-<hex>.tmp` and before the rename, that temporary file can remain; this process deletes only a temp it still owns. A same-user swap between the last stat and the rename cannot be prevented. A post-rename check that fails returns exit 3 with `source_writes: true`, `applied: false`, and `apply_unverified`, and does not try to put the old bytes back.
 
 Symlinks, hardlinks, special files, group- or world-writable files, untrusted directories, secret-like names, and Windows paths are refused. Apply does not delete a path, create a new path, chmod an executable bit on or off, commit, or run a shell. Ask and propose tool denies are unchanged.
+
+Direct preview, no proposal binding:
 
 ```json
 {
@@ -138,6 +142,21 @@ Symlinks, hardlinks, special files, group- or world-writable files, untrusted di
   "op": "apply",
   "source": "/home/gbbbdemo/work",
   "file": "notes/a.txt",
+  "replacement": {"schema": "gbbb.file_replacements/v1", "files": [{"path": "notes/a.txt", "content": "beta\n"}]}
+}
+```
+
+Reviewed-proposal preview. `base_sha256`, `proposal_token`, and `replacement_format` come from the accepted proposal. The write adds `confirm_apply` from this preview's `apply_token`, not the proposal token:
+
+```json
+{
+  "schema": "gbbb.invoke/v1",
+  "op": "apply",
+  "source": "/home/gbbbdemo/work",
+  "file": "notes/a.txt",
+  "replacement_format": "json-v1",
+  "base_sha256": "<proposal.base_sha256>",
+  "proposal_token": "<proposal.proposal_token>",
   "replacement": {"schema": "gbbb.file_replacements/v1", "files": [{"path": "notes/a.txt", "content": "beta\n"}]}
 }
 ```

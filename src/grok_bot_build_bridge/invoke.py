@@ -32,6 +32,7 @@ _PROPOSE = (_COMMON - {"show_answer"}) | {
 }
 _APPLY = frozenset({
     "schema", "op", "source", "file", "replacement", "base_sha256", "show_diff", "confirm_apply",
+    "proposal_token", "replacement_format",
 })
 _FORMATS = ("json-v1", "literal-v1", "native-schema-v1")
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
@@ -331,6 +332,13 @@ def _apply_invoke(obj: dict) -> int:
     if "base_sha256" in obj and (not isinstance(obj["base_sha256"], str) or len(obj["base_sha256"]) != 64
                                  or any(c not in "0123456789abcdef" for c in obj["base_sha256"])):
         raise InvokeError("field_invalid", "base_sha256 must be 64 lowercase hex characters")
+    if "proposal_token" in obj and (not isinstance(obj["proposal_token"], str) or len(obj["proposal_token"]) != 32
+                                    or any(c not in "0123456789abcdef" for c in obj["proposal_token"])):
+        raise InvokeError("field_invalid", "proposal_token must be 32 lowercase hex characters")
+    if "replacement_format" in obj and obj["replacement_format"] not in _FORMATS:
+        raise InvokeError("field_invalid", "replacement_format must be json-v1, literal-v1, or native-schema-v1")
+    if ("proposal_token" in obj) != ("replacement_format" in obj):
+        raise InvokeError("field_invalid", "proposal lineage requires proposal_token and replacement_format together")
     if not isinstance(obj["source"], str) or not isinstance(obj["file"], str):
         raise InvokeError("field_invalid", "source and file must be strings")
     try:
@@ -338,7 +346,8 @@ def _apply_invoke(obj: dict) -> int:
         key, created = load_or_create_consent_key(str(user_config_root() / "consent.key"))
         body, code = run_apply(
             source=obj["source"], file=obj["file"], replacement=text, key=key, show_diff=show,
-            base_sha256=obj.get("base_sha256"), confirm_apply=obj.get("confirm_apply"))
+            base_sha256=obj.get("base_sha256"), confirm_apply=obj.get("confirm_apply"),
+            proposal_token=obj.get("proposal_token"), replacement_format=obj.get("replacement_format"))
     except ApplyError as exc:
         return _err(exc.code, exc.message)
     except ContextError as exc:
@@ -472,9 +481,11 @@ def run_invoke(raw: bytes) -> int:
             info["selection"], dict(info["bases"]), proposed, info["key"],
             show=checked["show_proposal"], fmt=info["replacement_format"])
         if checked.get("return_replacement"):
+            path = info["selection"][0]
+            body["proposal"]["base_sha256"] = hashlib.sha256(dict(info["bases"])[path].encode()).hexdigest()
             body["proposal"]["replacement"] = {
                 "schema": "gbbb.file_replacements/v1",
-                "files": [{"path": info["selection"][0], "content": proposed[info["selection"][0]]}],
+                "files": [{"path": path, "content": proposed[path]}],
             }
     except (ProposalError, ContextError, SnapshotError) as exc:
         body["status"] = "proposal_rejected"
