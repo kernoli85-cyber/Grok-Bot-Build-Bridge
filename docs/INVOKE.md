@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.35.1-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.35.2-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -99,7 +99,7 @@ A rejection includes `proposal.diagnostic` and, by default, no answer text. It n
 
 `show_rejected_reply: true` together with `show_proposal: true` is an execute-only opt-in for that one response. Set the same `show_rejected_reply` value on the dry-run: the consent token binds it, and a mismatch does not call the model. The dry-run still does not print a reply. The shown text uses the same control-character replacement and length cap as `show_answer`. It is not stored, not sent to the database, outbox, or MCP, and it does not make the proposal accepted. Do not copy it into a public log. `propose` still does not accept fenced or otherwise invalid JSON.
 
-Nothing in this response writes the source tree, commits, or applies the edit. `show_proposal: true` (execute only) adds a transient unified diff for review. `show_answer` is not this operation and is not permission to apply. `proposal_token` binds the selection order, the base bytes, and the proposed bytes. The bridge does not store the proposal. The token is not an apply step. There is no apply command in this version.
+Nothing in this response writes the source tree, commits, or applies the edit. `show_proposal: true` (execute only) adds a transient unified diff for review. If one side has no final LF, the diff contains a line `\ No newline at end of file`. The replacement bytes are not given an extra LF. `show_answer` is not this operation and is not permission to apply. `proposal_token` binds the selection order, the base bytes, and the proposed bytes. The bridge does not store the proposal. The token is not an apply step. There is no apply command in this version.
 
 ```json
 {
@@ -124,7 +124,7 @@ Tools stay denied, the sandbox stays strict, and the working directory is a fres
 
 `apply` is a separate operation. It has no `executable`, `model`, `execute`, or `confirm_send`. Unknown fields are rejected. The envelope carries `source`, `file` (one relative path), and `replacement` (`gbbb.file_replacements/v1` with that one path). The bridge re-reads the file. It does not call a model, does not use a proposal token as permission, and does not save the proposal.
 
-A request without `confirm_apply` is a preview. It returns `apply_token`, `base_sha256`, `lineage`, `source_writes: false`, and `applied: false`. `show_diff: true` adds a unified diff and is bound into the token. The default preview has no file text.
+A request without `confirm_apply` is a preview. It returns `apply_token`, `base_sha256`, `lineage`, `source_writes: false`, and `applied: false`. `show_diff: true` adds the same unified diff, including a missing final LF, and is bound into the token. The diff does not rewrite the replacement. The default preview has no file text.
 
 `lineage: "proposal"` requires `base_sha256`, `proposal_token`, and `replacement_format` copied from the accepted proposal. The bridge checks that HMAC against the path, the claimed base hash, and the replacement bytes. A hash computed from a newer file does not match that token (`proposal_mismatch`). If the token matches and the file bytes differ from that base, the preview is `proposal_base_changed` and no apply token is issued. `lineage: "direct"` is a manually supplied replacement. It does not claim the text was reviewed against an earlier base. Omitting `proposal_token` is that direct path, even if the text once came from a model.
 

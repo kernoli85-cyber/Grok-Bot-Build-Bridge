@@ -461,6 +461,22 @@ def proposal_token(key: bytes, selection: list[str], bases: dict[str, str], prop
     )
 
 
+def render_unified_diff(path: str, base: str, proposed: str) -> str:
+    """Unified diff that marks a missing final LF. Does not change either text."""
+    if base == proposed:
+        return ""
+    parts = difflib.unified_diff(
+        base.splitlines(keepends=True),
+        proposed.splitlines(keepends=True),
+        fromfile=path, tofile=path, lineterm="\n")
+    out: list[str] = []
+    for part in parts:
+        out.append(part)
+        if not part.endswith("\n"):
+            out.append("\n\\ No newline at end of file\n")
+    return "".join(out)
+
+
 def review(selection: list[str], bases: dict[str, str], proposed: dict[str, str], key: bytes, *,
            show: bool, fmt: str = "json-v1") -> dict:
     changed_paths = [path for path in selection if bases[path] != proposed[path]]
@@ -481,10 +497,7 @@ def review(selection: list[str], bases: dict[str, str], proposed: dict[str, str]
         for path in selection:
             diff = ""
             if bases[path] != proposed[path]:
-                diff = "".join(difflib.unified_diff(
-                    bases[path].splitlines(keepends=True),
-                    proposed[path].splitlines(keepends=True),
-                    fromfile=path, tofile=path))
+                diff = render_unified_diff(path, bases[path], proposed[path])
             files.append({"path": path, "changed": bases[path] != proposed[path], "diff": diff})
         out["files"] = files
     return out

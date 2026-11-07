@@ -13,7 +13,6 @@ identity, mode, base bytes, and replacement bytes. This is not a transaction:
 """
 from __future__ import annotations
 
-import difflib
 import errno
 import hashlib
 import hmac
@@ -225,9 +224,8 @@ def _open_target(source: str, file: str) -> _Opened:
 
 
 def _diff(path: str, base: str, replacement: str) -> str:
-    return "".join(difflib.unified_diff(
-        base.splitlines(keepends=True), replacement.splitlines(keepends=True),
-        fromfile=path, tofile=path))
+    from .proposal import render_unified_diff
+    return render_unified_diff(path, base, replacement)
 
 
 def _common(opened: _Opened, replacement: str, *, show_diff: bool, key: bytes,
