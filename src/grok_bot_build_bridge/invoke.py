@@ -3,6 +3,7 @@
 Fixed argv is ``grok-bot-build-bridge invoke`` (no flags). Intended to be started
 by ``wsl.exe --exec`` with no shell. The envelope cannot set the environment,
 choose an arbitrary executable argv, or relax tool, sandbox, turn, or consent gates.
+``apply`` does not call a model. A proposal token is not permission to write.
 
 POSIX only. A Windows source tree is not read.
 """
@@ -17,7 +18,8 @@ from typing import Any
 
 SCHEMA = "gbbb.invoke/v1"
 MAX_ENVELOPE_BYTES = 16 * 1024
-_OPS = frozenset({"ask", "ask-context", "propose"})
+APPLY_MAX_ENVELOPE_BYTES = 64 * 1024
+_OPS = frozenset({"ask", "ask-context", "propose", "apply"})
 _COMMON = frozenset({
     "schema", "op", "executable", "model", "timeout_sec", "max_turns",
     "execute", "allow_model_call", "confirm_send", "show_answer",
@@ -26,7 +28,11 @@ _ASK = _COMMON | {"prompt"}
 _CONTEXT = _COMMON | {"source", "files", "question"}
 _PROPOSE = (_COMMON - {"show_answer"}) | {
     "source", "files", "instruction", "show_proposal", "show_rejected_reply", "replacement_format",
+    "return_replacement",
 }
+_APPLY = frozenset({
+    "schema", "op", "source", "file", "replacement", "base_sha256", "show_diff", "confirm_apply",
+})
 _FORMATS = ("json-v1", "literal-v1", "native-schema-v1")
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
 _EXE_BAD = set(";&|$`<>(){}[]!*?~#\\\"'\n\r\t ")
@@ -58,8 +64,8 @@ def _no_dupes(pairs: list[tuple[str, Any]]) -> dict:
 
 
 def parse_envelope(raw: bytes) -> dict:
-    if len(raw) > MAX_ENVELOPE_BYTES:
-        raise InvokeError("envelope_too_large", f"envelope exceeds {MAX_ENVELOPE_BYTES} bytes")
+    if len(raw) > APPLY_MAX_ENVELOPE_BYTES:
+        raise InvokeError("envelope_too_large", f"envelope exceeds {APPLY_MAX_ENVELOPE_BYTES} bytes")
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError:
@@ -73,16 +79,22 @@ def parse_envelope(raw: bytes) -> dict:
         raise InvokeError("envelope_invalid", "stdin must be one JSON object") from None
     if text.lstrip()[end:].strip():
         raise InvokeError("envelope_invalid", "stdin must be exactly one JSON object")
+    if isinstance(obj, dict) and obj.get("op") != "apply" and len(raw) > MAX_ENVELOPE_BYTES:
+        raise InvokeError("envelope_too_large", f"envelope exceeds {MAX_ENVELOPE_BYTES} bytes")
     if not isinstance(obj, dict):
         raise InvokeError("envelope_invalid", "stdin must be one JSON object")
     if obj.get("schema") != SCHEMA:
         raise InvokeError("schema_invalid", f"schema must be {SCHEMA}")
     op = obj.get("op")
     if op not in _OPS:
-        raise InvokeError("schema_invalid", "op must be ask, ask-context, or propose")
-    allowed = {"ask": _ASK, "ask-context": _CONTEXT, "propose": _PROPOSE}[op]
+        raise InvokeError("schema_invalid", "op must be ask, ask-context, propose, or apply")
+    allowed = {"ask": _ASK, "ask-context": _CONTEXT, "propose": _PROPOSE, "apply": _APPLY}[op]
     if set(obj) - allowed:
         raise InvokeError("schema_invalid", "envelope has unknown fields")
+    if op == "apply":
+        if not {"source", "file", "replacement"} <= set(obj):
+            raise InvokeError("schema_invalid", "apply requires source, file, and replacement")
+        return obj
     if not {"executable", "model"} <= set(obj):
         raise InvokeError("schema_invalid", "executable and model are required")
     if op == "ask" and "prompt" not in obj:
@@ -154,6 +166,9 @@ def _checked(obj: dict) -> dict:
     show = _bool(obj, "show_answer") if "show_answer" in obj or obj.get("op") != "propose" else False
     show_proposal = _bool(obj, "show_proposal") if obj.get("op") == "propose" else False
     show_rejected = _bool(obj, "show_rejected_reply") if obj.get("op") == "propose" else False
+    return_replacement = _bool(obj, "return_replacement") if obj.get("op") == "propose" else False
+    if return_replacement and (not isinstance(obj.get("files"), list) or len(obj["files"]) != 1):
+        raise InvokeError("field_invalid", "return_replacement requires exactly one selected file")
     replacement_format = "json-v1"
     if obj.get("op") == "propose" and "replacement_format" in obj:
         replacement_format = obj["replacement_format"]
@@ -176,7 +191,8 @@ def _checked(obj: dict) -> dict:
     timeout = _timeout(obj)
     choice = _model_choice(obj, timeout)
     return {"execute": execute, "show": show, "show_proposal": show_proposal,
-            "show_rejected": show_rejected, "replacement_format": replacement_format,
+            "show_rejected": show_rejected, "return_replacement": return_replacement,
+            "replacement_format": replacement_format,
             "executable": executable, "timeout": timeout, "choice": choice}
 
 
@@ -186,7 +202,7 @@ def _shape(argv, prompt: str, placeholder: str) -> list[str]:
 
 def _binding(op: str, executable: str, choice, timeout: float, selection: list[str], argv, placeholder, prompt: str,
              *, show_rejected_reply: bool = False, replacement_format: str = "json-v1",
-             native: tuple[str, str] | None = None) -> dict:
+             return_replacement: bool = False, native: tuple[str, str] | None = None) -> dict:
     binding = {
         "op": op, "backend": "posix-local", "executable": executable,
         "executable_realpath": os.path.realpath(executable),
@@ -198,6 +214,7 @@ def _binding(op: str, executable: str, choice, timeout: float, selection: list[s
     }
     if op == "propose":
         binding["show_rejected_reply"] = bool(show_rejected_reply)
+        binding["return_replacement"] = bool(return_replacement)
         binding["replacement_format"] = replacement_format
         if native is not None:
             binding["native_system_sha256"] = hashlib.sha256(native[0].encode()).hexdigest()
@@ -290,6 +307,7 @@ def _prepare(obj: dict, checked: dict) -> dict:
     binding = _binding(obj["op"], executable, choice, timeout, selection, plan.argv, LOCAL_PLACEHOLDER_CWD, prompt,
                        show_rejected_reply=bool(checked.get("show_rejected")),
                        replacement_format=str(checked.get("replacement_format") or "json-v1"),
+                       return_replacement=bool(checked.get("return_replacement")),
                        native=native)
     return {
         "prompt": prompt, "selection": selection, "choice": choice, "timeout": timeout,
@@ -302,15 +320,49 @@ def _prepare(obj: dict, checked: dict) -> dict:
     }
 
 
+def _apply_invoke(obj: dict) -> int:
+    from .apply_file import ApplyError, replacement_text, run_apply
+    from .context_pack import ContextError, load_or_create_consent_key
+    from .state.paths import user_config_root
+
+    show = _bool(obj, "show_diff") if "show_diff" in obj else False
+    if "confirm_apply" in obj and not isinstance(obj["confirm_apply"], str):
+        raise InvokeError("field_invalid", "confirm_apply must be a string")
+    if "base_sha256" in obj and (not isinstance(obj["base_sha256"], str) or len(obj["base_sha256"]) != 64
+                                 or any(c not in "0123456789abcdef" for c in obj["base_sha256"])):
+        raise InvokeError("field_invalid", "base_sha256 must be 64 lowercase hex characters")
+    if not isinstance(obj["source"], str) or not isinstance(obj["file"], str):
+        raise InvokeError("field_invalid", "source and file must be strings")
+    try:
+        text = replacement_text(obj["replacement"], obj["file"])
+        key, created = load_or_create_consent_key(str(user_config_root() / "consent.key"))
+        body, code = run_apply(
+            source=obj["source"], file=obj["file"], replacement=text, key=key, show_diff=show,
+            base_sha256=obj.get("base_sha256"), confirm_apply=obj.get("confirm_apply"))
+    except ApplyError as exc:
+        return _err(exc.code, exc.message)
+    except ContextError as exc:
+        return _err(exc.code, exc.message)
+    except OSError:
+        return _err("io_error", "unexpected OSError (details withheld: may contain paths)")
+    body["writes"] = {"consent_key_created": created, "db": False, "outbox": False, "proposal_saved": False}
+    return _out(body, code)
+
+
 def run_invoke(raw: bytes) -> int:
     try:
         obj = parse_envelope(raw)
-        checked = _checked(obj)
+        checked = None if obj["op"] == "apply" else _checked(obj)
     except InvokeError as exc:
         return _err(exc.code, exc.message)
     if os.name != "posix" or sys.platform == "win32":
         return _err("posix_only",
                     "invoke runs inside POSIX (for example WSL); Windows does not read sources or start a listener")
+    if obj["op"] == "apply":
+        try:
+            return _apply_invoke(obj)
+        except InvokeError as exc:
+            return _err(exc.code, exc.message)
     try:
         info = _prepare(obj, checked)
     except InvokeError as exc:
@@ -419,6 +471,11 @@ def run_invoke(raw: bytes) -> int:
         body["proposal"] = review(
             info["selection"], dict(info["bases"]), proposed, info["key"],
             show=checked["show_proposal"], fmt=info["replacement_format"])
+        if checked.get("return_replacement"):
+            body["proposal"]["replacement"] = {
+                "schema": "gbbb.file_replacements/v1",
+                "files": [{"path": info["selection"][0], "content": proposed[info["selection"][0]]}],
+            }
     except (ProposalError, ContextError, SnapshotError) as exc:
         body["status"] = "proposal_rejected"
         proposal = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
@@ -442,5 +499,5 @@ def run_invoke(raw: bytes) -> int:
 
 
 def cmd_invoke(_args) -> int:
-    raw = sys.stdin.buffer.read(MAX_ENVELOPE_BYTES + 1)
+    raw = sys.stdin.buffer.read(APPLY_MAX_ENVELOPE_BYTES + 1)
     return run_invoke(raw)

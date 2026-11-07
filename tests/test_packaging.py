@@ -354,6 +354,11 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         native = dict(prop, replacement_format="native-schema-v1")
         r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(native))
         assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        apply_env = {"schema": "gbbb.invoke/v1", "op": "apply", "source": "/tmp/gbbb-src",
+                     "file": "a.txt", "replacement": {"schema": "gbbb.file_replacements/v1",
+                     "files": [{"path": "a.txt", "content": "beta\n"}]}}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
     else:
         d = json.loads(r.stdout)
         assert r.returncode == 0 and d["mode"] == "dry_run" and d["model_call"] is False
@@ -465,6 +470,24 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
         assert body["proposal"]["format"] == "native-schema-v1" and body["proposal"]["changed"] is False
         assert nat.read_bytes() == nat_before and "I edited the file" not in r.stdout
+        target = psrc / "notes" / "one.txt"
+        target.write_text("alpha\n")
+        os.chmod(target, 0o644)
+        before_mode = os.stat(target).st_mode
+        apply_env = {"schema": "gbbb.invoke/v1", "op": "apply", "source": str(psrc),
+                     "file": "notes/one.txt",
+                     "replacement": {"schema": "gbbb.file_replacements/v1",
+                                     "files": [{"path": "notes/one.txt", "content": "beta\n"}]}}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        preview = json.loads(r.stdout)
+        assert r.returncode == 0 and preview["source_writes"] is False and preview["applied"] is False
+        assert target.read_text() == "alpha\n" and "beta" not in r.stdout
+        apply_env.update(base_sha256=preview["base_sha256"], confirm_apply=preview["apply_token"])
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        done_apply = json.loads(r.stdout)
+        assert r.returncode == 0 and done_apply["source_writes"] is True and done_apply["applied"] is True
+        assert target.read_text() == "beta\n" and os.stat(target).st_mode == before_mode
+        assert not list(psrc.rglob(".gbbb-apply-*.tmp"))
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout
