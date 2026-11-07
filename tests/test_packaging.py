@@ -387,7 +387,8 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         prop.update(execute=True, allow_model_call=True, confirm_send=tok, show_proposal=True)
         r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
         body = json.loads(r.stdout)
-        assert r.returncode == 0 and body["proposal"]["applied"] is False and body["source_writes"] is False
+        assert r.returncode == 0 and body["status"] == "proposal_accepted"
+        assert body["proposal"]["applied"] is False and body["source_writes"] is False
         assert body["proposal"]["changed"] is True and pfile.read_bytes() == before
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))

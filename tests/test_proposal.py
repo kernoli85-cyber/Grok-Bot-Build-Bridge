@@ -35,3 +35,9 @@ def test_rejects_malformed_schema_chatter_and_duplicate_json():
 def test_identical_content_parses():
     found = parse_replacements(_obj([{"path": "notes/a.txt", "content": "same\n"}]), SEL)
     assert found == {"notes/a.txt": "same\n"}
+
+
+def test_files_only_object_stays_wrong_schema():
+    with pytest.raises(ProposalError) as exc:
+        parse_replacements(json.dumps({"files": [{"path": "notes/a.txt", "content": "same\n"}]}), SEL)
+    assert exc.value.code == "proposal_wrong_schema"

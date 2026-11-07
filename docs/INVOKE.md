@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.0-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.1-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -67,7 +67,15 @@ Success requires Grok's `modelUsage` keys to be within the declared id and `expe
 
 `propose` asks the same protected no-tools runner for a full-file replacement of the explicitly selected POSIX text files. The instruction is plain text, like a question. It cannot add paths, flags, or commands.
 
-The model text is untrusted. The bridge accepts it only when it is exactly one JSON object, schema `gbbb.file_replacements/v1`, with each selected path once and no others. Markdown fences, a second JSON value, a wrong path, control characters, or an oversize file reject the proposal. A proposal that matches the current bytes is `changed: false`.
+The model text is untrusted. The prompt tells the model to return exactly one JSON object with both required keys:
+
+```json
+{"schema":"gbbb.file_replacements/v1","files":[{"path":"notes/a.txt","content":"full file text\n"}]}
+```
+
+`schema` must be that string. `files` lists each selected path once, with the full new text in `content`. An object that has only `files` is rejected. Markdown fences, a second JSON value, a wrong path, control characters, or an oversize file also reject the proposal. A proposal that matches the current bytes is `changed: false`.
+
+`result.status` is only the runner. For `propose`, the top-level `status` is the outcome: `proposal_accepted`, `proposal_rejected`, or `execution_needs_review` / `execution_failed`. Exit 0 is only `proposal_accepted`. A rejected proposal is exit 3 even when `result.status` is `succeeded`. That rejection is not a usable edit.
 
 Nothing in this response writes the source tree, commits, or applies the edit. `show_proposal: true` (execute only) adds a transient unified diff for review. `show_answer` is not this operation and is not permission to apply. `proposal_token` binds the selection order, the base bytes, and the proposed bytes. The bridge does not store the proposal. The token is not an apply step. There is no apply command in this version.
 

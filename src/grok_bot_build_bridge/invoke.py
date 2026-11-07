@@ -336,6 +336,7 @@ def run_invoke(raw: bytes) -> int:
     body["applied"] = False
     body["source_writes"] = False
     if res["status"] != "succeeded":
+        body["status"] = "execution_" + res["status"]
         return _out(body, 3)
     from .context_pack import ContextError
     from .proposal import ProposalError, parse_replacements, review, stage_proposal
@@ -349,9 +350,11 @@ def run_invoke(raw: bytes) -> int:
         body["proposal"] = review(
             info["selection"], dict(info["bases"]), proposed, info["key"], show=checked["show_proposal"])
     except (ProposalError, ContextError, SnapshotError) as exc:
+        body["status"] = "proposal_rejected"
         body["proposal"] = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
                             "source_writes": False, "stored": False, "error": exc.code}
         return _out(body, 3)
+    body["status"] = "proposal_accepted"
     return _out(body, 0)
 
 
