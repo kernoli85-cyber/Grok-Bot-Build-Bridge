@@ -1,6 +1,7 @@
 """`ask-context`: explicit files from a local POSIX source -> fenced 8 KiB prompt -> consent token.
 
-DRY-RUN ONLY in v0.29. Planning reads the selected files, copies them through the real
+v0.30: --backend posix-local (default) executes grok directly via runner.posix_local after
+all gates; --backend wsl-exe stays refused for POSIX-read sources. Historical v0.29 notes: Planning reads the selected files, copies them through the real
 snapshot reader/pipe/receiver into a private staging dir, packs them, computes a keyed
 consent token, then deletes the staging dir. No model call, no network, nothing stored
 except the private consent key (created once, 0600).
@@ -24,6 +25,7 @@ from pathlib import Path
 from .context_pack import ContextError, consent_fingerprint, load_or_create_consent_key, pack_context
 
 ASK_CTX_PLACEHOLDER_CWD = "/tmp/gbbb-ask-CREATEDONEXECUTE"
+LOCAL_PLACEHOLDER_CWD = "/tmp/gbbb-ask-0000000000000000"
 
 
 def _out(obj: dict, code: int) -> int:
@@ -107,28 +109,60 @@ def cmd_ask_context(args) -> int:
     except SnapshotError as exc:
         return _err(exc.code, exc.message)
     staging_removed = getattr(_stage_and_pack, "last_removed", False)
-    try:
-        plan = build_wsl_grok_ask_plan(
-            task_id="ask-context", distro=args.wsl_distro, user=args.wsl_user,
-            grok_path=args.executable, cwd=ASK_CTX_PLACEHOLDER_CWD, prompt=packed.prompt,
-            max_turns=args.max_turns, timeout_sec=timeout, model=choice)
-    except PlanError as exc:
-        return _err(exc.code, exc.message)
-    shape = [("<PROMPT>" if a == packed.prompt else "<CWD>" if a == ASK_CTX_PLACEHOLDER_CWD else a)
-             for a in plan.argv]
-    binding = {"backend": "wsl_exe", "distro": plan.wsl_distro, "user": plan.wsl_user,
-               "executable": plan.executable, "model_id": choice.model_id,
-               "expect_usage_keys": list(choice.expect_usage_keys), "max_turns": plan.max_turns,
+    from .runner import posix_local as PL
+    backend = args.backend
+    if backend == "wsl-exe":
+        if not (args.wsl_distro and args.wsl_user):
+            return _err("wsl_target_required", "--backend wsl-exe needs --wsl-distro and --wsl-user")
+        try:
+            plan = build_wsl_grok_ask_plan(
+                task_id="ask-context", distro=args.wsl_distro, user=args.wsl_user,
+                grok_path=args.executable, cwd=ASK_CTX_PLACEHOLDER_CWD, prompt=packed.prompt,
+                max_turns=args.max_turns, timeout_sec=timeout, model=choice)
+        except PlanError as exc:
+            return _err(exc.code, exc.message)
+        argv, placeholder, target = plan.argv, ASK_CTX_PLACEHOLDER_CWD, {"distro": plan.wsl_distro, "user": plan.wsl_user}
+    else:
+        try:
+            lp = PL.build_local_plan(grok_path=args.executable, cwd=LOCAL_PLACEHOLDER_CWD, prompt=packed.prompt,
+                                     model=choice, max_turns=args.max_turns, timeout_sec=timeout)
+        except PL.RunnerError as exc:
+            return _err(exc.code, exc.message)
+        argv, placeholder, target = lp.argv, LOCAL_PLACEHOLDER_CWD, {}
+
+    def _shape(av, ph):
+        return [("<PROMPT>" if a == packed.prompt else "<CWD>" if a == ph else a) for a in av]
+    shape = _shape(argv, placeholder)
+    binding = {"backend": backend, **target, "executable": args.executable, "model_id": choice.model_id,
+               "expect_usage_keys": list(choice.expect_usage_keys), "max_turns": args.max_turns,
                "timeout_sec": timeout, "selection": list(args.file),
                "argv_shape_sha256": hashlib.sha256(json.dumps(shape).encode()).hexdigest()}
     token = consent_fingerprint(key, packed, binding)
     if args.execute:
         if not hmac.compare_digest(args.confirm_send, token):
-            return _err("consent_mismatch", "token does not match the current files/model/flags; "
+            return _err("consent_mismatch", "token does not match the current files/model/backend/flags; "
                         "re-run the dry-run and review again")
-        return _err("execute_unsupported_here",
-                    "consent verified, but no runner ships for this layout: the source is read on "
-                    "POSIX while the protected ask backend is Windows wsl.exe. Nothing was sent.")
+        if backend == "wsl-exe":
+            return _err("execute_unsupported_here",
+                        "consent verified, but a POSIX-read source cannot use the Windows wsl.exe backend; "
+                        "use --backend posix-local inside WSL. Nothing was sent.")
+        try:
+            PL.validate_executable(args.executable)
+            cwd = PL.make_private_cwd()
+        except PL.RunnerError as exc:
+            return _err(exc.code, exc.message)
+        try:
+            real = PL.build_local_plan(grok_path=args.executable, cwd=cwd, prompt=packed.prompt,
+                                       model=choice, max_turns=args.max_turns, timeout_sec=timeout)
+        except PL.RunnerError as exc:
+            PL._cleanup_cwd(cwd)
+            return _err(exc.code, exc.message)
+        if _shape(real.argv, cwd) != shape:
+            PL._cleanup_cwd(cwd)
+            return _err("consent_mismatch", "launch argv differs from the confirmed plan")
+        res = PL.run_local(real, show_answer=args.show_answer)
+        return _out({"mode": "execute", "backend": backend, "model_call": True, "stored": False,
+                     "result": res}, 0 if res["status"] == "succeeded" else 3)
     return _out({
         "mode": "dry_run", "model_call": False, "network": False,
         "reads": "only the explicitly selected files (text content) via the snapshot reader",
@@ -136,10 +170,13 @@ def cmd_ask_context(args) -> int:
                    "consent_key_created": key_created, "db": False, "outbox": False},
         "context": packed.summary(), "snapshot_skipped": rep.skipped,
         "model": {"source": choice.source, "kind": choice.kind, "availability": "unverified"},
-        "max_turns": plan.max_turns, "timeout_sec": timeout, "tools": "all denied (text-only)",
+        "max_turns": args.max_turns, "timeout_sec": timeout, "tools": "all denied (text-only)",
         "consent_token": token,
         "consent_binds": sorted(["prompt_text", *binding]),
-        "execute": "not available in this version (dry-run only); see docs/CONTEXT_ASK.md",
+        "backend": backend,
+        "execute": ("posix-local: --execute --allow-model-call --confirm-send <token> runs grok directly "
+                    "(no wsl.exe); executable is checked only at execute" if backend == "posix-local"
+                    else "wsl-exe: refused for POSIX-read sources"),
     }, 0)
 
 
@@ -148,8 +185,9 @@ def add_parser(sub) -> None:
     p.add_argument("--source", required=True, help="Local POSIX source dir (not a Windows path)")
     p.add_argument("--file", action="append", required=True, help="Relative file path; repeat; order kept")
     p.add_argument("--question", required=True)
-    p.add_argument("--wsl-distro", required=True)
-    p.add_argument("--wsl-user", required=True)
+    p.add_argument("--backend", choices=["posix-local", "wsl-exe"], default="posix-local")
+    p.add_argument("--wsl-distro", default=None)
+    p.add_argument("--wsl-user", default=None)
     p.add_argument("--executable", required=True)
     p.add_argument("--model", default=None)
     p.add_argument("--no-model-preference", action="store_true")
@@ -160,4 +198,5 @@ def add_parser(sub) -> None:
     p.add_argument("--execute", action="store_true")
     p.add_argument("--allow-model-call", action="store_true")
     p.add_argument("--confirm-send", default=None)
+    p.add_argument("--show-answer", action="store_true", help="Print bounded answer (transient, never stored)")
     p.set_defaults(func=cmd_ask_context)

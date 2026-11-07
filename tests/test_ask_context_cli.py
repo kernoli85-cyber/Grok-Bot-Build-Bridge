@@ -10,10 +10,10 @@ if os.name != "posix" or os.getuid() == 0:
     pytest.skip("POSIX non-root only", allow_module_level=True)
 
 
-def _run(tmp_path, *extra, source=None, files=("docs/notes.txt",), q="What is the port?", settings=None):
+def _run(tmp_path, *extra, exe=None, source=None, files=("docs/notes.txt",), q="What is the port?", settings=None):
     base = [sys.executable, "-m", "grok_bot_build_bridge.cli", "ask-context",
             "--source", str(source or tmp_path / "src"), "--question", q,
-            "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/home/okern/.local/bin/grok",
+            "--executable", str(exe or "/home/okern/.local/bin/grok"),
             "--model", "LM-Studio", "--model-settings", str(settings or tmp_path / "ms.json"),
             "--consent-key", str(tmp_path / "cfg" / "consent.key")]
     for f in files:
@@ -74,12 +74,23 @@ def test_any_binding_change_invalidates_token(setup, change):
     assert rc == 2 and e["error"]["code"] == "consent_mismatch"
 
 
-def test_execute_gates_then_explicit_unsupported(setup):
+def test_execute_gates_before_anything_runs(setup):
     _, d = _run(setup)
     assert _run(setup, "--execute")[1]["error"]["code"] == "model_call_gated"
     assert _run(setup, "--execute", "--allow-model-call")[1]["error"]["code"] == "send_not_confirmed"
     rc, e = _run(setup, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
-    assert rc == 2 and e["error"]["code"] == "execute_unsupported_here" and "Nothing was sent" in e["error"]["message"]
+    assert rc == 2 and e["error"]["code"] == "executable_missing" and "/home" not in json.dumps(e)
+
+
+def test_wsl_backend_bound_separately_and_refused(setup):
+    _, local = _run(setup)
+    w = ("--backend", "wsl-exe", "--wsl-distro", "Ubuntu", "--wsl-user", "okern")
+    _, wsl = _run(setup, *w)
+    assert wsl["consent_token"] != local["consent_token"]
+    rc, e = _run(setup, *w, "--execute", "--allow-model-call", "--confirm-send", local["consent_token"])
+    assert e["error"]["code"] == "consent_mismatch"
+    rc, e = _run(setup, *w, "--execute", "--allow-model-call", "--confirm-send", wsl["consent_token"])
+    assert e["error"]["code"] == "execute_unsupported_here"
 
 
 @pytest.mark.parametrize("name,content,code", [

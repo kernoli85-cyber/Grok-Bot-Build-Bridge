@@ -291,7 +291,22 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert r.returncode == 0 and d["model_call"] is False and "47113" not in r.stdout, r.stdout
         assert json.loads(cli(*cargs).stdout)["consent_token"] == d["consent_token"]
         r = cli(*cargs, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
-        assert json.loads(r.stdout)["error"]["code"] == "execute_unsupported_here"
+        assert json.loads(r.stdout)["error"]["code"] == "executable_missing"
+        # installed wheel + direct POSIX runner + dummy grok (prints a fixed JSON, no model)
+        bindir = tmp_path / "dgrok"
+        bindir.mkdir(mode=0o755)
+        dg = bindir / "grok"
+        dg.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
+                      "assert '--sandbox' in sys.argv and 'MCPTool' in sys.argv and os.listdir('.') == []\n"
+                      "print(json.dumps({'text': 'ok', 'stopReason': 'end_turn', 'num_turns': 1, "
+                      "'usage': {'input_tokens': 1, 'output_tokens': 1}, 'modelUsage': {'qwen3.5-9b-mtp': {}}}))\n")
+        dg.chmod(0o755)
+        dargs = [a if a != "/usr/bin/grok" else str(dg) for a in cargs]
+        tok = json.loads(cli(*dargs).stdout)["consent_token"]
+        r = cli(*dargs, "--execute", "--allow-model-call", "--confirm-send", tok)
+        res = json.loads(r.stdout)["result"]
+        assert r.returncode == 0 and res["status"] == "succeeded" and res["model_identity"] == "confirmed", r.stdout
+        assert res["cwd_cleanup"] == "removed" and res["cost_status"] == "unknown"
     elif os.name != "posix":
         assert r.returncode == 2 and d["error"]["code"] == "posix_source_only"
     # doctor from the installed wheel: fixture default, read-only state check, no creation.

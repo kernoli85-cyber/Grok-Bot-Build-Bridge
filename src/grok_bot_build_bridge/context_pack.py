@@ -209,28 +209,50 @@ def _keyed(key: bytes, purpose: str, data: bytes) -> str:
     return hmac.new(key, purpose.encode() + b"\x00" + data, hashlib.sha256).hexdigest()
 
 
+def _trusted_key_dir(path: str) -> None:
+    st = os.lstat(path)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o022:
+        raise ContextError("consent_key_invalid", "consent key directory must be a real dir owned by you, not group/world-writable")
+
+
 def load_or_create_consent_key(path: str) -> tuple[bytes, bool]:
-    """Private 32-byte key (0600, own uid, no symlink). Returns (key, created)."""
+    """Private 32-byte key (0600, own uid, no symlink). Returns (key, created).
+
+    Creation is atomic and never overwrites: write a private temp file, fsync, then
+    os.link() it to the final name (fails if another planner won the race; we then read
+    theirs). Readers therefore never see a partial key.
+    """
+    if not os.path.isabs(path):
+        raise ContextError("consent_key_invalid", "consent key path must be absolute")
+    parent = os.path.dirname(path)
+    if not os.path.lexists(parent):
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+    _trusted_key_dir(parent)
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     created = False
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        parent = os.path.dirname(path)
-        os.makedirs(parent, mode=0o700, exist_ok=True)
+    if not os.path.lexists(path):
+        tmp = os.path.join(parent, f".consent.key.{secrets.token_hex(8)}.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
             os.write(fd, secrets.token_bytes(32))
+            os.fsync(fd)
+        finally:
             os.close(fd)
+        try:
+            os.link(tmp, path)
             created = True
         except FileExistsError:
             pass
+        finally:
+            os.unlink(tmp)
+    try:
         fd = os.open(path, flags)
     except OSError:
         raise ContextError("consent_key_invalid", "consent key cannot be opened safely (symlink?)") from None
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077 or st.st_size != 32:
+        if (not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o077
+                or st.st_size != 32 or st.st_nlink != 1):
             raise ContextError("consent_key_invalid", "consent key must be a private 32-byte file")
         key = os.read(fd, 33)
     finally:
