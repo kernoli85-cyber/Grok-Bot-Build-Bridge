@@ -47,7 +47,7 @@ def test_pipeline_real_pipe_pack_confirm_plan(tmp_path):
     assert pk.file_count == 2 and pk.crlf_normalised == 1 and pk.prompt_bytes <= P.ASK_MAX_PROMPT_BYTES
     assert FACT.strip() in pk.prompt and pk.prompt.count("<<<GBBB-FILE ") == 2
     s = pk.summary()
-    assert "notes" not in str(s) and "47113" not in str(s) and s["fingerprint"] == pk.fingerprint
+    assert "notes" not in str(s) and "47113" not in str(s) and pk.fingerprint not in str(s)
     with pytest.raises(C.ContextError, match="fingerprint"):
         C.confirm_send(pk, None)
     with pytest.raises(C.ContextError):

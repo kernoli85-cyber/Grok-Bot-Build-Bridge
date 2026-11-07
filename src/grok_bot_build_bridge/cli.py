@@ -1412,6 +1412,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--format", choices=["json", "text"], default="json")
     p_ask.set_defaults(func=cmd_ask)
 
+    from .context_cli import add_parser as _ctx_add
+    _ctx_add(sub)
+
     p_ms = sub.add_parser("model-settings", help="Owner's bridge model preference and aliases (local file only; no Grok call)")
     p_ms.add_argument("--settings", default=None, help="Path (default: user config dir model_settings.json)")
     ms_sub = p_ms.add_subparsers(dest="ms_cmd", required=True)

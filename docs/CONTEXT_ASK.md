@@ -23,3 +23,20 @@ Synthetic fixtures went through the real reader, pipe, receiver and pack on the 
 | 3 | answer not present | `NOT_IN_CONTEXT` | end_turn | qwen3.5-9b-mtp | ~10 s |
 
 No run reported cost (unknown, not zero) or is_error. These are behaviour observations on one local model, **not security proof**. Isolation rests on the denied tools and the sandbox, not on the model following the preamble. The host bridge companion is still 0.16.2; the runs used reviewed, fixed argv, not an installed 0.28 build.
+
+## v0.29.0: `ask-context` CLI (dry-run only) and a reproducible consent token
+```
+grok-bot-build-bridge ask-context --source DIR --file a.txt [--file b.txt] --question "…" \
+  --wsl-distro Ubuntu --wsl-user U --executable /abs/grok --model LM-Studio
+```
+- **POSIX source only.** On Windows the command returns `posix_source_only`; Windows-side sources fail closed.
+- **What planning does.** It reads only the selected files and copies them through the real snapshot reader, pipe and receiver into a fresh private `gbbb-ctx-stage-*` dir under `$TMPDIR`. It then packs them and **deletes the staging dir**; the output reports `staging_dir_created`/`removed`. There is no model call, no network, no DB and no outbox. The output holds counts, the snapshot skip counts and the token, and never file names, text, the question or an unkeyed hash.
+- **Model.** An explicit registered alias with an expected usage key is required. There is no implicit or cloud default.
+- **Reproducible tags.** The fence tag is `HMAC(key, canonical files+question)`, so the same inputs give the same prompt. Every fence marker is refused in file text and in the question, so a derived tag cannot be spoofed.
+- **Consent token.** The token is 32 hex characters: `HMAC-SHA256(key, {sha256(prompt), backend, distro, user, executable, model id, expected keys, max_turns, timeout, selection order, sha256(argv shape)})`.
+  - The key is 32 random bytes in `<user config>/consent.key` (0600, own uid, no symlink), created on the first dry-run. That one-time creation is the only persistent write.
+  - **Threat model.** The token binds consent to the exact content and settings. Because it is keyed, someone who sees it in logs or chat cannot test guesses about the file contents.
+  - **Not covered.** It is not a secret against someone who can read the key file (same user). It does not expire; it simply stops matching when anything changes.
+  - **What invalidates it.** A file edit, the question, file order, the model's expected key, timeout, turns or a key change; each is tested.
+- **`--execute`.** It needs `--allow-model-call` and `--confirm-send <token>`, and it recomputes everything right before the step. A mismatch gives `consent_mismatch`. A match still gives **`execute_unsupported_here`**, because the source is read on POSIX (inside WSL) while the protected ask backend runs on Windows through `wsl.exe`. No in-WSL runner ships yet, so no fake executable path is used. Nothing is sent.
+- **Live status.** No model call was made for v0.29: the new behaviour cannot reach the model without installing the companion inside WSL (not approved). The v0.28 live observations above still stand.

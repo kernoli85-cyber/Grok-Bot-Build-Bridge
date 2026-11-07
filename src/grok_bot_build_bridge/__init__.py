@@ -1,3 +1,3 @@
 """Grok Bot-Build Bridge — discovery and job routing (local companion core)."""
 
-__version__ = "0.28.0"
+__version__ = "0.29.0"

@@ -276,6 +276,24 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     assert r.returncode == 0 and json.loads(r.stdout)["saved"] is True
     r = cli("model-settings", "--settings", str(ms), "check-result", "LM-Studio", "--result-file", str(fx))
     assert r.returncode == 0 and json.loads(r.stdout)["identity_with_current_settings"] == "confirmed"
+    # ask-context from the installed wheel: POSIX dry-run (reproducible keyed token), Windows fail-closed.
+    csrc = tmp_path / "ctxsrc"
+    csrc.mkdir()
+    (csrc / "n.txt").write_text("synthetic port 47113\n")
+    if os.name == "posix":
+        csrc.chmod(0o755)
+    cargs = ("ask-context", "--source", str(csrc), "--file", "n.txt", "--question", "Port?",
+             "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok",
+             "--model", "LM-Studio", "--model-settings", str(ms), "--consent-key", str(tmp_path / "ck" / "consent.key"))
+    r = cli(*cargs)
+    d = json.loads(r.stdout)
+    if os.name == "posix" and not (hasattr(os, "geteuid") and os.geteuid() == 0):
+        assert r.returncode == 0 and d["model_call"] is False and "47113" not in r.stdout, r.stdout
+        assert json.loads(cli(*cargs).stdout)["consent_token"] == d["consent_token"]
+        r = cli(*cargs, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
+        assert json.loads(r.stdout)["error"]["code"] == "execute_unsupported_here"
+    elif os.name != "posix":
+        assert r.returncode == 2 and d["error"]["code"] == "posix_source_only"
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout
