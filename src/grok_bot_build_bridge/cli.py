@@ -253,6 +253,7 @@ def cmd_jobs_demo(args: argparse.Namespace) -> int:
 def cmd_jobs_status(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     jobs = store.list_jobs()
+    show = bool(getattr(args, "show_result", False))
     events = store.list_outbox()
     json.dump(
         {
@@ -264,6 +265,7 @@ def cmd_jobs_status(args: argparse.Namespace) -> int:
                     "status": j.status.value,
                     "attempt": j.attempt,
                     "backend": j.backend,
+                    **({"result_summary": store.get_job_result(j.task_id)} if show else {}),
                 }
                 for j in jobs
             ],
@@ -564,6 +566,10 @@ def _cmd_runner_wsl_grok_smoke(args: argparse.Namespace, store: JobStore) -> int
         "status": outcome.status if outcome else "dry_run",
         "returncode": outcome.returncode if outcome else None,
         "timed_out": outcome.timed_out if outcome else False,
+        "error_code": outcome.error_code if outcome else None,
+        "process_exit_ok": (outcome.returncode == 0) if outcome else None,
+        "result_summary": outcome.result_summary if outcome else None,
+        "result_note": "result_summary is allowlisted metadata; response text never stored except exact BRIDGE_OK match",
         "limits": limits,
     }, sys.stdout, indent=2)
     sys.stdout.write("\n")
@@ -958,6 +964,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("jobs-status", help="Inspect jobs/outbox in a state DB")
     p_status.add_argument("--state-db", required=True)
+    p_status.add_argument("--show-result", action="store_true", help="Include allowlisted result summary (default hidden)")
     p_status.set_defaults(func=cmd_jobs_status)
 
     p_tick = sub.add_parser(

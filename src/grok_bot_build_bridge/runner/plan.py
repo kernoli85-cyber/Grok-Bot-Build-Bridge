@@ -80,6 +80,8 @@ class ApprovedExecutionPlan:
     execution_kind: str = "unspecified"
     wsl_distro: str | None = None
     wsl_user: str | None = None
+    parse_grok_json: bool = False
+    expected_text: str | None = None
 
 
 def _reject_forbidden(tokens: Sequence[str]) -> None:
@@ -365,6 +367,7 @@ def require_wsl_distro_running(distro: str, wsl_list_text: str) -> None:
 # (2026-11-07). Flag SEMANTICS below come from public main-branch docs, which may
 # be newer than 1.0.70 -> labelled unverified until observed in a real run.
 GROK_SMOKE_PROMPT = "Antworte nur BRIDGE_OK"
+GROK_SMOKE_EXPECTED = "BRIDGE_OK"
 GROK_DENY_BUILTIN_TOOLS = (
     "run_terminal_cmd,read_file,grep,list_dir,search_replace,web_search,"
     "web_fetch,todo_write,task,Agent"
@@ -441,4 +444,5 @@ def build_wsl_grok_smoke_plan(
         prompt_via_stdin=False, force_prompt_argv=True,
         execution_transport="wsl_exe", execution_kind="grok_smoke_one_shot",
         wsl_distro=probe.wsl_distro, wsl_user=probe.wsl_user,
+        parse_grok_json=True, expected_text="BRIDGE_OK",
     )

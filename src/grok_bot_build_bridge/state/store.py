@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(delivery, next_attempt_at);
+
+-- Added v0.16.3: bounded, allowlisted structured run result (never raw stdout).
+CREATE TABLE IF NOT EXISTS job_results (
+  task_id TEXT PRIMARY KEY,
+  summary_json TEXT NOT NULL,
+  created_at REAL NOT NULL
+);
 """
 
 
@@ -273,6 +280,26 @@ class JobStore:
             "SELECT * FROM outbox WHERE event_id = ?", (event_id,)
         ).fetchone()
         return self._row_event(row)
+
+    MAX_RESULT_SUMMARY_BYTES = 4096
+
+    def put_job_result(self, task_id: str, summary: dict[str, Any]) -> None:
+        """Store an allowlisted result summary once (first write wins; no overwrite)."""
+        data = json.dumps(summary, sort_keys=True, allow_nan=False)
+        if len(data.encode("utf-8")) > self.MAX_RESULT_SUMMARY_BYTES:
+            raise StoreError("result_too_large", "result summary exceeds bound")
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO job_results(task_id, summary_json, created_at) VALUES (?,?,?)",
+                (task_id, data, self.clock.time()),
+            )
+
+    def get_job_result(self, task_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT summary_json FROM job_results WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return json.loads(row["summary_json"]) if row else None
 
     def get_job(self, task_id: str) -> JobRecord | None:
         with self._connect() as conn:

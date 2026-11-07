@@ -134,3 +134,23 @@ Dry-run by default; a real call needs `--execute --allow-model-call` (default of
 Recommended read-only pre-check before any model call (no model, needs host approval):
 `grok inspect --cwd /tmp/gbbb-smoke-<random>` and `grok mcp list` to see which MCP
 servers/skills/rules would load.
+
+## v0.16.3 — bounded Grok JSON result capture
+
+Plans with `parse_grok_json=True` (the WSL smoke plan) parse stdout as one
+documented `--output-format json` object (whole stdout; noise ⇒ `not_json`).
+
+- Bound: 64 KiB; truncated, oversize, non-UTF-8, non-object, missing `text` ⇒ unknown, never success.
+- Allowlisted fields only: `stopReason` (`^[a-z_]{1,32}$`), `sessionId` (opaque, `^[A-Za-z0-9_-]{1,128}$`),
+  `num_turns`, known `usage` integer keys, `total_cost_usd` (finite, 0..1e6, reported exactly), `total_cost_usd_ticks`.
+- Absent cost, `cost_is_partial`, `usage_is_incomplete`, NaN/Inf/negative ⇒ cost **unknown** (not free).
+- Response text is never stored; only length + sha256. `matched_text` is set only when the
+  stripped JSON `text` equals exactly `BRIDGE_OK`.
+- `process_exit_ok` (returncode 0) is reported separately from `model_ok` (`end_turn`, not `is_error`).
+- Exit 0 with an invalid/mismatched result ⇒ job `needs_review`, error code
+  `success_exit_invalid_result` | `model_result_not_ok` | `smoke_text_mismatch`; no automatic rerun.
+- Stored in table `job_results` (CREATE IF NOT EXISTS migration, first write wins, ≤4 KiB, no raw stdout).
+  Hidden from `jobs-status` unless `--show-result`; never in outbox payloads.
+
+**10:00 CET run (v0.16.2):** the only evidence is process exit 0 (~26 s). The response,
+sessionId and cost were discarded by 0.16.2 and are unknown; they were not recovered and not rerun.

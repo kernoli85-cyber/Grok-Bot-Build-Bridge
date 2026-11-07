@@ -30,6 +30,7 @@ class RunOutcome:
     plan_backend: str | None = None
     execution_transport: str | None = None
     execution_kind: str | None = None
+    result_summary: dict | None = None
 
 
 def _heartbeat_loop(
@@ -123,7 +124,38 @@ def _execute_one_shot_inner(
         stop.set()
         hb_thread.join(timeout=max(1.0, interval + 1.0))
 
-    return _commit_result(
+    summary = None
+    if plan.parse_grok_json and not (result.timed_out or result.error):
+        from .grok_result import classify, parse_grok_json_result
+
+        s = parse_grok_json_result(
+            result.stdout, truncated=result.stdout_truncated, expected_text=plan.expected_text
+        )
+        summary = s.to_dict()
+        try:
+            store.put_job_result(plan.task_id, summary)
+        except StoreError:
+            summary = {"parse_status": "store_failed", "model_ok": False}
+        if result.returncode == 0:
+            code = classify(s, require_expected=plan.expected_text is not None)
+            if code is not None:
+                try:
+                    store.mark_needs_review(plan.task_id, error_code=code, owner=owner)
+                except StoreError:
+                    pass
+                cur = store.get_job(plan.task_id)
+                return RunOutcome(
+                    dry_run=False, task_id=plan.task_id,
+                    status=cur.status.value if cur else JobStatus.NEEDS_REVIEW.value,
+                    returncode=0, timed_out=False, error_code=code,
+                    stdout_truncated=result.stdout_truncated,
+                    stderr_truncated=result.stderr_truncated,
+                    note="exit0_but_result_not_accepted_needs_review_no_auto_requeue",
+                    argv_preview=argv_preview, heartbeats=hb_count[0],
+                    result_summary=summary,
+                )
+    from dataclasses import replace as _replace
+    return _replace(_commit_result(
         store,
         plan,
         owner=owner,
@@ -131,7 +163,7 @@ def _execute_one_shot_inner(
         argv_preview=argv_preview,
         heartbeats=hb_count[0],
         lease_lost_flag=lost.is_set(),
-    )
+    ), result_summary=summary)
 
 
 def _commit_result(

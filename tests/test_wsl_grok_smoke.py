@@ -54,7 +54,7 @@ def test_cli_allowed_call_uses_wsl_exe_mocked(tmp_path, capsys, monkeypatch):
 
     def fake(argv, **kw):
         seen["argv"] = tuple(argv)
-        return RunResult(tuple(argv), 0, '{"text":"BRIDGE_OK"}', "")
+        return RunResult(tuple(argv), 0, '{"text":"BRIDGE_OK","stopReason":"end_turn"}', "")
     monkeypatch.setattr(w, "run_argv", fake)
     orig = w.execute_one_shot
     monkeypatch.setattr(cli, "execute_one_shot", lambda s, p, **k: orig(s, p, executor=fake, **k))
@@ -62,6 +62,26 @@ def test_cli_allowed_call_uses_wsl_exe_mocked(tmp_path, capsys, monkeypatch):
     d = json.loads(capsys.readouterr().out)
     assert d["grok_executed"] is True and d["status"] == "succeeded"
     assert seen["argv"][0] == "wsl.exe"
+    rs = d["result_summary"]
+    assert d["process_exit_ok"] is True and rs["model_ok"] and rs["matched_text"] == "BRIDGE_OK"
+    assert rs["cost_status"] == "unknown" and rs["total_cost_usd"] is None
+
+
+def test_cli_exit0_unparseable_is_needs_review_not_success(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_wsl_list_reader", lambda: (RUNNING, None))
+    import grok_bot_build_bridge.runner.worker as w
+    calls = []
+
+    def fake(argv, **kw):
+        calls.append(1)
+        return RunResult(tuple(argv), 0, "BRIDGE_OK", "")  # plain text, not JSON
+    orig = w.execute_one_shot
+    monkeypatch.setattr(cli, "execute_one_shot", lambda s, p, **k: orig(s, p, executor=fake, **k))
+    assert cli.main(_base(tmp_path) + ["--execute", "--allow-model-call"]) != 0
+    d = json.loads(capsys.readouterr().out)
+    assert d["process_exit_ok"] is True and d["status"] == "needs_review"
+    assert d["error_code"] == "success_exit_invalid_result"
+    assert d["result_summary"]["matched_text"] is None and len(calls) == 1  # no rerun
 
 
 def test_cli_allowed_call_refuses_stopped(tmp_path, capsys, monkeypatch):
