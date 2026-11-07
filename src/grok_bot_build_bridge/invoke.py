@@ -24,7 +24,7 @@ _COMMON = frozenset({
 })
 _ASK = _COMMON | {"prompt"}
 _CONTEXT = _COMMON | {"source", "files", "question"}
-_PROPOSE = (_COMMON - {"show_answer"}) | {"source", "files", "instruction", "show_proposal"}
+_PROPOSE = (_COMMON - {"show_answer"}) | {"source", "files", "instruction", "show_proposal", "show_rejected_reply"}
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
 _EXE_BAD = set(";&|$`<>(){}[]!*?~#\\\"'\n\r\t ")
 
@@ -150,10 +150,15 @@ def _checked(obj: dict) -> dict:
     allow = _bool(obj, "allow_model_call")
     show = _bool(obj, "show_answer") if "show_answer" in obj or obj.get("op") != "propose" else False
     show_proposal = _bool(obj, "show_proposal") if obj.get("op") == "propose" else False
+    show_rejected = _bool(obj, "show_rejected_reply") if obj.get("op") == "propose" else False
+    if show_rejected and not show_proposal:
+        raise InvokeError("field_invalid", "show_rejected_reply requires show_proposal")
     if "confirm_send" in obj and not isinstance(obj["confirm_send"], str):
         raise InvokeError("field_invalid", "confirm_send must be a string")
-    if not execute and (allow or show or show_proposal or "confirm_send" in obj):
-        raise InvokeError("field_invalid", "allow_model_call, show_answer, show_proposal, and confirm_send require execute")
+    if not execute and (allow or show or "confirm_send" in obj):
+        raise InvokeError("field_invalid", "allow_model_call, show_answer, and confirm_send require execute")
+    if not execute and obj.get("op") != "propose" and (show_proposal or show_rejected):
+        raise InvokeError("field_invalid", "show_proposal requires execute")
     if execute and not allow:
         raise InvokeError("model_call_gated", "real call requires allow_model_call")
     if execute and "confirm_send" not in obj:
@@ -163,15 +168,16 @@ def _checked(obj: dict) -> dict:
     timeout = _timeout(obj)
     choice = _model_choice(obj, timeout)
     return {"execute": execute, "show": show, "show_proposal": show_proposal,
-            "executable": executable, "timeout": timeout, "choice": choice}
+            "show_rejected": show_rejected, "executable": executable, "timeout": timeout, "choice": choice}
 
 
 def _shape(argv, prompt: str, placeholder: str) -> list[str]:
     return [("<PROMPT>" if item == prompt else "<CWD>" if item == placeholder else item) for item in argv]
 
 
-def _binding(op: str, executable: str, choice, timeout: float, selection: list[str], argv, placeholder, prompt: str) -> dict:
-    return {
+def _binding(op: str, executable: str, choice, timeout: float, selection: list[str], argv, placeholder, prompt: str,
+             *, show_rejected_reply: bool = False) -> dict:
+    binding = {
         "op": op, "backend": "posix-local", "executable": executable,
         "executable_realpath": os.path.realpath(executable),
         "model_id": choice.model_id, "model_kind": choice.kind, "model_source": choice.source,
@@ -180,6 +186,9 @@ def _binding(op: str, executable: str, choice, timeout: float, selection: list[s
         "argv_shape_sha256": hashlib.sha256(
             json.dumps(_shape(argv, prompt, placeholder)).encode()).hexdigest(),
     }
+    if op == "propose":
+        binding["show_rejected_reply"] = bool(show_rejected_reply)
+    return binding
 
 
 def _token(key: bytes, prompt: str, binding: dict) -> str:
@@ -259,7 +268,8 @@ def _prepare(obj: dict, checked: dict) -> dict:
             model=choice, max_turns=1, timeout_sec=timeout)
     except PL.RunnerError as exc:
         raise InvokeError(exc.code, exc.message) from None
-    binding = _binding(obj["op"], executable, choice, timeout, selection, plan.argv, LOCAL_PLACEHOLDER_CWD, prompt)
+    binding = _binding(obj["op"], executable, choice, timeout, selection, plan.argv, LOCAL_PLACEHOLDER_CWD, prompt,
+                       show_rejected_reply=bool(checked.get("show_rejected")))
     return {
         "prompt": prompt, "selection": selection, "choice": choice, "timeout": timeout,
         "executable": executable, "token": _token(key, prompt, binding), "key_created": key_created,
@@ -358,9 +368,15 @@ def run_invoke(raw: bytes) -> int:
             info["selection"], dict(info["bases"]), proposed, info["key"], show=checked["show_proposal"])
     except (ProposalError, ContextError, SnapshotError) as exc:
         body["status"] = "proposal_rejected"
-        body["proposal"] = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
-                            "source_writes": False, "stored": False, "error": exc.code,
-                            "diagnostic": diagnostic}
+        proposal = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,
+                    "source_writes": False, "stored": False, "error": exc.code,
+                    "diagnostic": diagnostic}
+        if checked["show_rejected"] and checked["show_proposal"]:
+            from .runner.grok_result import sanitize_display_text
+            shown, cut = sanitize_display_text(captured or "")
+            proposal["rejected_reply"] = shown
+            proposal["rejected_reply_cut"] = cut
+        body["proposal"] = proposal
         return _out(body, 3)
     body["status"] = "proposal_accepted"
     return _out(body, 0)

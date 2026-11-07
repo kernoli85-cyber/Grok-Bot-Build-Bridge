@@ -203,6 +203,8 @@ def test_constructed_prompt_requires_schema_and_contract_reply_is_accepted(monke
     assert "gbbb.file_replacements/v1" in prompt
     assert '"schema"' in prompt and '"files"' in prompt
     assert "one key" not in prompt.lower()
+    assert "NOT_IN_CONTEXT" not in prompt
+    assert prompt.rfind("INSTRUCTION:") > prompt.rfind("<<<END")
     assert texts == [("calc.py", CALC)]
     reply = json.dumps({"schema": "gbbb.file_replacements/v1",
                         "files": [{"path": "calc.py", "content": CALC_FIXED}]})
@@ -254,9 +256,26 @@ def test_result_field_and_prose_diagnostic_do_not_echo_text(monkeypatch, tmp_pat
     code, bad = _run(sent, capsys)
     diag = bad["proposal"]["diagnostic"]
     assert code == 3 and bad["status"] == "proposal_rejected" and bad["proposal"]["error"] == "proposal_malformed"
+    assert "rejected_reply" not in bad["proposal"]
     assert bad["result"]["status"] == "succeeded" and bad["result"]["stdout_truncated"] is False
     assert diag["extraction_key"] == "text" and diag["leading"] == "letter"
     assert diag["json"] == "expecting_value" and diag["json_offset"] == 0 and diag["fence"] == "none"
     blob = json.dumps(diag)
     assert "def add" not in blob and "calc.py" not in blob and "Keep mul" not in blob
     assert (src / "calc.py").read_text() == CALC
+    bad_json = '{"schema":"gbbb.file_replacements/v1","files":[}'
+    opted = _dummy(tmp_path / "opt-in", bad_json + "\u202e")
+    flags = {"show_proposal": True, "show_rejected_reply": True}
+    code, dry = _run(_body(opted, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul.", **flags), capsys)
+    assert "rejected_reply" not in json.dumps(dry)
+    sent = _body(opted, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul.",
+                 execute=True, allow_model_call=True, confirm_send=dry["consent_token"], **flags)
+    code, shown = _run(sent, capsys)
+    assert code == 3 and shown["status"] == "proposal_rejected"
+    assert shown["proposal"]["error"] == "proposal_malformed"
+    assert shown["proposal"]["rejected_reply"].endswith("\ufffd")
+    assert shown["proposal"]["stored"] is False and (src / "calc.py").read_text() == CALC
+    sent_flip = _body(opted, src, files=["calc.py"], instruction="Change add to return a + b. Keep mul.",
+                      execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
+    code, mismatch = _run(sent_flip, capsys)
+    assert code == 2 and mismatch["error"]["code"] == "consent_mismatch"

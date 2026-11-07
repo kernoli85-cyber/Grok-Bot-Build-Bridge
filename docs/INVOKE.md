@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.2-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.3-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -77,7 +77,9 @@ The model text is untrusted. The prompt tells the model to return exactly one JS
 
 `result.status` is only the runner. For `propose`, the top-level `status` is the outcome: `proposal_accepted`, `proposal_rejected`, or `execution_needs_review` / `execution_failed`. Exit 0 is only `proposal_accepted`. A rejected proposal is exit 3 even when `result.status` is `succeeded`. That rejection is not a usable edit. This path is not a proven edit workflow.
 
-A rejection includes `proposal.diagnostic` and no answer text. It names the result field used (`text` or `result`), byte length, whether the other field was also present, a leading class (`object`, `letter`, …), a fence class, and a JSON error class plus character offset. `fenced_json: true` means a markdown fence wrapped something that starts like JSON; that reply is still rejected. `stdout_capture_truncated` is only the bridge's capture cap. `usage` token counts do not prove the model cut the answer short.
+A rejection includes `proposal.diagnostic` and, by default, no answer text. It names the result field used (`text` or `result`), byte length, whether the other field was also present, a leading class (`object`, `letter`, …), a fence class, and a JSON error class plus character offset. `fenced_json: true` means a markdown fence wrapped something that starts like JSON; that reply is still rejected. `stdout_capture_truncated` is only the bridge's capture cap. `usage` token counts do not prove the model cut the answer short.
+
+`show_rejected_reply: true` together with `show_proposal: true` is an execute-only opt-in for that one response. Set the same `show_rejected_reply` value on the dry-run: the consent token binds it, and a mismatch does not call the model. The dry-run still does not print a reply. The shown text uses the same control-character replacement and length cap as `show_answer`. It is not stored, not sent to the database, outbox, or MCP, and it does not make the proposal accepted. Do not copy it into a public log. `propose` still does not accept fenced or otherwise invalid JSON.
 
 Nothing in this response writes the source tree, commits, or applies the edit. `show_proposal: true` (execute only) adds a transient unified diff for review. `show_answer` is not this operation and is not permission to apply. `proposal_token` binds the selection order, the base bytes, and the proposed bytes. The bridge does not store the proposal. The token is not an apply step. There is no apply command in this version.
 

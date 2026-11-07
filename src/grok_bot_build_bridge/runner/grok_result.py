@@ -309,6 +309,14 @@ def result_text(stdout: str | bytes | None) -> str | None:
     return result_text_meta(stdout)["text"]
 
 
+def sanitize_display_text(text: str) -> tuple[str, bool]:
+    """Same control-character and length rules as opt-in answer display. Not stored."""
+    clean = _ANSWER_CTRL.sub("\ufffd", (text or "").replace("\r\n", "\n"))
+    if len(clean) > ANSWER_MAX_CHARS:
+        return clean[:ANSWER_MAX_CHARS], True
+    return clean, False
+
+
 def extract_answer_text(stdout: str | bytes | None, *, truncated: bool = False) -> tuple[str | None, bool]:
     """Transient, bounded answer text for opt-in console display. Never persisted.
 
