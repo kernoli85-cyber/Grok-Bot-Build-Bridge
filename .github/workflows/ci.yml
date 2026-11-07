@@ -63,4 +63,4 @@ jobs:
       - name: Isolated venv install smoke (outside checkout)
         shell: bash
         run: |
-          python -m pytest -q tests/test_packaging.py -k "isolated_venv or wheel_excludes or packaged_resources or draft_plugin or sha256 or wheel_name"
+          python -m pytest -q tests/test_packaging.py -k "e2e_dummy or isolated_venv or wheel_excludes or packaged_resources or draft_plugin or sha256 or wheel_name"

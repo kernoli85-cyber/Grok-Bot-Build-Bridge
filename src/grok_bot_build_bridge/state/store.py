@@ -78,6 +78,18 @@ CREATE TABLE IF NOT EXISTS job_results (
   summary_json TEXT NOT NULL,
   created_at REAL NOT NULL
 );
+
+-- Added v0.16.4: strict versioned results, one per (task, attempt), written only
+-- in the same transaction as the live lease owner's terminal transition.
+-- The v0.16.3 job_results table is left untouched and never read (unvalidated).
+CREATE TABLE IF NOT EXISTS job_results_v2 (
+  task_id TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  schema TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  created_at REAL NOT NULL,
+  PRIMARY KEY (task_id, attempt)
+);
 """
 
 
@@ -283,23 +295,92 @@ class JobStore:
 
     MAX_RESULT_SUMMARY_BYTES = 4096
 
-    def put_job_result(self, task_id: str, summary: dict[str, Any]) -> None:
-        """Store an allowlisted result summary once (first write wins; no overwrite)."""
-        data = json.dumps(summary, sort_keys=True, allow_nan=False)
+    def commit_job_result(
+        self,
+        task_id: str,
+        *,
+        owner: str,
+        summary: dict[str, Any],
+        terminal: JobStatus,
+        error_code: str | None = None,
+    ) -> JobRecord:
+        """Atomically persist a validated result AND the terminal transition + outbox.
+
+        Only the current, unexpired lease owner of a RUNNING job may commit. If the
+        job is cancelled/terminal/needs_review or the lease is stale, nothing is
+        written (an expired lease flips to needs_review without the result).
+        """
+        from ..runner.grok_result import SUMMARY_SCHEMA, validate_summary
+
+        if terminal not in {JobStatus.SUCCEEDED, JobStatus.NEEDS_REVIEW, JobStatus.FAILED}:
+            raise StoreError("illegal_transition", "result commit needs a terminal outcome")
+        if terminal is not JobStatus.SUCCEEDED and not error_code:
+            raise StoreError("invalid_result", "non-success commit needs error_code")
+        if not validate_summary(summary):
+            raise StoreError("invalid_result", "summary failed strict schema validation")
+        if terminal is JobStatus.SUCCEEDED and summary["parse_status"] != "ok":
+            raise StoreError("invalid_result", "success requires a parsed result")
+        data = json.dumps(summary, sort_keys=True, allow_nan=False, separators=(",", ":"))
         if len(data.encode("utf-8")) > self.MAX_RESULT_SUMMARY_BYTES:
             raise StoreError("result_too_large", "result summary exceeds bound")
+        post_error: StoreError | None = None
+        out: JobRecord | None = None
         with self._tx() as conn:
-            conn.execute(
-                "INSERT OR IGNORE INTO job_results(task_id, summary_json, created_at) VALUES (?,?,?)",
-                (task_id, data, self.clock.time()),
-            )
+            row = conn.execute("SELECT * FROM jobs WHERE task_id = ?", (task_id,)).fetchone()
+            if not row:
+                raise StoreError("job_not_found", f"unknown task_id {task_id!r}")
+            job = self._row_job(row)
+            if job.status == JobStatus.CANCELLED:
+                raise StoreError("cancelled", "job cancelled; result not committed")
+            job, post_error = self._guard_live_owner(conn, job, owner, op="commit_result")
+            if post_error is None:
+                if job.status != JobStatus.RUNNING:
+                    raise StoreError("illegal_transition", f"commit from {job.status.value}")
+                try:
+                    conn.execute(
+                        "INSERT INTO job_results_v2(task_id, attempt, schema, summary_json, created_at)"
+                        " VALUES (?,?,?,?,?)",
+                        (task_id, job.attempt, SUMMARY_SCHEMA, data, self.clock.time()),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StoreError("result_exists", "result already committed") from exc
+                kw: dict[str, Any] = dict(clear_lease=True, expect_status=JobStatus.RUNNING)
+                if terminal is JobStatus.SUCCEEDED:
+                    out = self._transition(conn, task_id, terminal, event_type="job.succeeded",
+                                           dedupe_key="succeeded", **kw)
+                elif terminal is JobStatus.NEEDS_REVIEW:
+                    out = self._transition(
+                        conn, task_id, terminal, error_code=error_code,
+                        event_type="job.needs_review",
+                        dedupe_key=f"needs_review:{error_code}:{job.attempt}",
+                        extra_payload={"auto_requeue": False, "reason": error_code}, **kw)
+                else:
+                    out = self._transition(
+                        conn, task_id, terminal, error_code=error_code, bump_attempt=True,
+                        event_type="job.failed",
+                        dedupe_key=f"failed:{job.attempt + 1}:{error_code}", **kw)
+        if post_error is not None:
+            raise post_error
+        assert out is not None
+        return out
 
     def get_job_result(self, task_id: str) -> dict[str, Any] | None:
+        """Latest validated result for a task (v2 only); invalid rows are not returned."""
+        from ..runner.grok_result import validate_summary
+
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT summary_json FROM job_results WHERE task_id = ?", (task_id,)
+                "SELECT summary_json FROM job_results_v2 WHERE task_id = ?"
+                " ORDER BY attempt DESC LIMIT 1",
+                (task_id,),
             ).fetchone()
-        return json.loads(row["summary_json"]) if row else None
+        if not row:
+            return None
+        try:
+            d = json.loads(row[0])
+        except ValueError:
+            return None
+        return d if validate_summary(d) else None
 
     def get_job(self, task_id: str) -> JobRecord | None:
         with self._connect() as conn:

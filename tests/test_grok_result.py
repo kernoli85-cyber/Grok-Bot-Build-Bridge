@@ -21,7 +21,7 @@ def test_docs_example_parses_allowlisted_fields_only():
     s = parse_grok_json_result(DOCS)
     assert s.parse_status == "ok" and s.model_ok and s.stop_reason == "end_turn"
     assert s.session_id == "abc123" and s.num_turns == 7
-    assert s.total_cost_usd == 0.01268905 and s.total_cost_usd_ticks == 126890500
+    assert s.total_cost_usd == "0.01268905" and s.total_cost_usd_ticks == 126890500
     assert s.cost_status == "reported" and s.usage["total_tokens"] == 50103
     d = s.to_dict()
     assert "summary of the codebase" not in json.dumps(d)  # text never echoed
@@ -52,6 +52,21 @@ def test_truncated_and_bad_bytes():
 def test_bad_cost_is_unknown(cost):
     s = parse_grok_json_result('{"text":"BRIDGE_OK","stopReason":"end_turn","total_cost_usd":%s}' % cost)
     assert s.total_cost_usd is None and s.cost_status == "unknown"
+
+
+def test_cost_exact_decimal_no_float_rounding():
+    s = parse_grok_json_result('{"text":"a","stopReason":"end_turn","total_cost_usd":0.1000000000000000055511}')
+    assert s.total_cost_usd is None  # >18 decimals rejected rather than rounded
+    s = parse_grok_json_result('{"text":"a","stopReason":"end_turn","total_cost_usd":0.30000000000000004}')
+    assert s.total_cost_usd == "0.30000000000000004"
+    s = parse_grok_json_result('{"text":"a","stopReason":"end_turn","total_cost_usd":1E-3}')
+    assert s.total_cost_usd == "0.001"
+
+
+def test_documented_variant_keys_tolerated_and_dupes_rejected():
+    s = parse_grok_json_result('{"result":"BRIDGE_OK","stop_reason":"end_turn","session_id":"s1"}', expected_text="BRIDGE_OK")
+    assert s.parse_status == "ok" and s.schema_variant == "alt_keys" and s.matched_text == "BRIDGE_OK"
+    assert parse_grok_json_result('{"text":"x","text":"BRIDGE_OK"}').parse_status == "not_json"
 
 
 def test_partial_cost_omitted_and_absent_unknown():
@@ -104,7 +119,7 @@ def test_real_dummy_process_paths(tmp_path, mode, status, code):
     blob = json.dumps([e.payload_json if hasattr(e, "payload_json") else str(e) for e in store.list_outbox()])
     assert "BRIDGE_OK" not in blob and "0d3f-AB_9" not in blob  # never in outbox
     if mode == "ok":
-        assert saved["matched_text"] == "BRIDGE_OK" and saved["cost_status"] == "reported"
+        assert saved["matched_text"] == "BRIDGE_OK" and saved["cost_status"] == "reported" and saved["total_cost_usd"] == "0.0001"
         assert saved["session_id"] == "0d3f-AB_9"
     # needs_review is terminal for automation: no auto requeue
     assert store.get_job(f"t-{mode}").attempt <= 1
@@ -129,13 +144,24 @@ def test_status_hides_result_by_default(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["jobs"][0]["result_summary"]["matched_text"] == "BRIDGE_OK"
 
 
-def test_migration_on_pre_v0163_db(tmp_path):
+def test_migration_and_strict_schema(tmp_path):
+    from grok_bot_build_bridge.runner.grok_result import validate_summary
+    from grok_bot_build_bridge.state import JobStatus
+    from grok_bot_build_bridge.state.store import StoreError
     db = tmp_path / "old.db"
     JobStore(db)
     with sqlite3.connect(db) as c:
-        c.execute("DROP TABLE job_results")
-    s = JobStore(db)  # idempotent re-init adds table
-    s.enqueue_job(task_id="m1", backend="wsl", cwd="/tmp")
-    s.put_job_result("m1", {"parse_status": "ok"})
-    s.put_job_result("m1", {"parse_status": "overwrite"})  # first write wins
-    assert JobStore(db).get_job_result("m1") == {"parse_status": "ok"}
+        c.execute("DROP TABLE job_results_v2")
+        c.execute("INSERT INTO job_results(task_id, summary_json, created_at) VALUES ('m1','{\"matched_text\":\"BRIDGE_OK\"}',0)")
+    s = JobStore(db)  # idempotent re-init adds v2 table
+    JobStore(db)
+    assert s.get_job_result("m1") is None  # legacy unvalidated row never surfaced
+    good = parse_grok_json_result('{"text":"BRIDGE_OK","stopReason":"end_turn"}', expected_text="BRIDGE_OK").to_dict()
+    assert validate_summary(good)
+    for bad in [dict(good, extra=1), dict(good, matched_text="hi"), dict(good, session_id="a b"),
+                dict(good, total_cost_usd=0.1), dict(good, schema="v0"), dict(good, model_ok="yes")]:
+        assert not validate_summary(bad)
+    s.enqueue_job(task_id="m2", backend="wsl", cwd="/tmp")
+    with pytest.raises(StoreError) as e:
+        s.commit_job_result("m2", owner="w", summary=dict(good, matched_text="evil"), terminal=JobStatus.SUCCEEDED)
+    assert e.value.code == "invalid_result"

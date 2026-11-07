@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Dummy emitting grok-style JSON (test only; no network, no grok)."""
-import json, sys
-mode = sys.argv[1] if len(sys.argv) > 1 else "ok"
+import json, os, sys
+MODES = ("ok", "noise", "mismatch", "badutf8")
+mode = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] in MODES else "ok"
+base = os.path.basename(__file__)
+for m in MODES[1:]:
+    if m in base:  # copies named bridge-dummy-<mode>.py select mode without argv
+        mode = m
 if mode == "ok":
     print(json.dumps({"text": "BRIDGE_OK\n", "stopReason": "end_turn", "sessionId": "0d3f-AB_9",
                       "num_turns": 1, "usage": {"input_tokens": 5, "output_tokens": 2},

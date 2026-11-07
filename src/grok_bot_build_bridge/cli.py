@@ -385,6 +385,11 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
         json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
         sys.stdout.write("\n")
         return 2
+    if args.parse_grok_json or args.expect_bridge_ok:
+        from dataclasses import replace as _r
+        from .runner.plan import GROK_SMOKE_EXPECTED
+        plan = _r(plan, parse_grok_json=True,
+                  expected_text=GROK_SMOKE_EXPECTED if args.expect_bridge_ok else None)
     try:
         outcome = execute_one_shot(
             store,
@@ -416,6 +421,8 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
             "transport_note": _transport_note(outcome.plan_backend, outcome.execution_transport),
             "heartbeats": outcome.heartbeats,
             "lease_lost": outcome.lease_lost,
+            "process_exit_ok": outcome.returncode == 0 if outcome.returncode is not None else None,
+            "result_summary": outcome.result_summary,
             "state_db": str(store.db_path),
             "cancel_note": "cancellation is state-only; process tree kill not claimed",
             "cancel_capability": {
@@ -430,6 +437,8 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
         indent=2,
     )
     sys.stdout.write("\n")
+    if plan.parse_grok_json:  # result-checked runs: nonzero unless accepted
+        return 0 if outcome.status in {"dry_run", "succeeded"} else 1
     return 0
 
 
@@ -1019,6 +1028,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--deny", action="append", default=[])
     p_run.add_argument("--extra", action="append", default=[])
     p_run.add_argument("--execute", action="store_true", help="Actually spawn process")
+    p_run.add_argument("--parse-grok-json", action="store_true", help="Parse stdout as grok --output-format json into an allowlisted summary (text never stored)")
+    p_run.add_argument("--expect-bridge-ok", action="store_true", help="Require exact BRIDGE_OK text (implies --parse-grok-json)")
     p_run.set_defaults(func=cmd_runner_run)
 
     p_retry = sub.add_parser("jobs-retry", help="Explicit retry from failed/needs_review")

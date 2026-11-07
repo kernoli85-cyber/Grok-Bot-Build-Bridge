@@ -124,38 +124,12 @@ def _execute_one_shot_inner(
         stop.set()
         hb_thread.join(timeout=max(1.0, interval + 1.0))
 
-    summary = None
-    if plan.parse_grok_json and not (result.timed_out or result.error):
-        from .grok_result import classify, parse_grok_json_result
-
-        s = parse_grok_json_result(
-            result.stdout, truncated=result.stdout_truncated, expected_text=plan.expected_text
+    if plan.parse_grok_json and not (result.timed_out or result.error) and not lost.is_set():
+        return _commit_parsed_result(
+            store, plan, owner=owner, result=result,
+            argv_preview=argv_preview, heartbeats=hb_count[0],
         )
-        summary = s.to_dict()
-        try:
-            store.put_job_result(plan.task_id, summary)
-        except StoreError:
-            summary = {"parse_status": "store_failed", "model_ok": False}
-        if result.returncode == 0:
-            code = classify(s, require_expected=plan.expected_text is not None)
-            if code is not None:
-                try:
-                    store.mark_needs_review(plan.task_id, error_code=code, owner=owner)
-                except StoreError:
-                    pass
-                cur = store.get_job(plan.task_id)
-                return RunOutcome(
-                    dry_run=False, task_id=plan.task_id,
-                    status=cur.status.value if cur else JobStatus.NEEDS_REVIEW.value,
-                    returncode=0, timed_out=False, error_code=code,
-                    stdout_truncated=result.stdout_truncated,
-                    stderr_truncated=result.stderr_truncated,
-                    note="exit0_but_result_not_accepted_needs_review_no_auto_requeue",
-                    argv_preview=argv_preview, heartbeats=hb_count[0],
-                    result_summary=summary,
-                )
-    from dataclasses import replace as _replace
-    return _replace(_commit_result(
+    return _commit_result(
         store,
         plan,
         owner=owner,
@@ -163,7 +137,95 @@ def _execute_one_shot_inner(
         argv_preview=argv_preview,
         heartbeats=hb_count[0],
         lease_lost_flag=lost.is_set(),
-    ), result_summary=summary)
+    )
+
+
+_STALE_CODES = {"lease_mismatch", "lease_lost", "needs_review", "terminal_job", "cancelled",
+                "race_lost", "illegal_transition", "result_exists"}
+
+
+def _commit_parsed_result(
+    store: JobStore,
+    plan: ApprovedExecutionPlan,
+    *,
+    owner: str,
+    result: RunResult,
+    argv_preview: tuple[str, ...],
+    heartbeats: int,
+) -> RunOutcome:
+    """Parse, then commit result + terminal status + outbox in ONE transaction.
+
+    Never reports success unless that exact transaction committed. Never re-executes.
+    """
+    from .grok_result import classify, parse_grok_json_result
+
+    s = parse_grok_json_result(
+        result.stdout, truncated=result.stdout_truncated, expected_text=plan.expected_text
+    )
+    summary = s.to_dict()
+    if result.returncode == 0:
+        code = classify(s, require_expected=plan.expected_text is not None)
+        terminal = JobStatus.SUCCEEDED if code is None else JobStatus.NEEDS_REVIEW
+    elif result.returncode is not None and result.returncode > 0:
+        code, terminal = f"exit_{result.returncode}", JobStatus.FAILED
+    else:
+        code, terminal = f"signal_or_abort_{result.returncode}", JobStatus.NEEDS_REVIEW
+
+    def out(status: str, error_code: str | None, note: str, *, rs=None, lease_lost=False):
+        return RunOutcome(
+            dry_run=False, task_id=plan.task_id, status=status,
+            returncode=result.returncode, timed_out=False, error_code=error_code,
+            stdout_truncated=result.stdout_truncated, stderr_truncated=result.stderr_truncated,
+            note=note, argv_preview=argv_preview, heartbeats=heartbeats,
+            lease_lost=lease_lost, result_summary=rs,
+        )
+
+    def observed() -> str | None:
+        try:
+            j = store.get_job(plan.task_id)
+            return j.status.value if j else None
+        except Exception:  # noqa: BLE001 - db unavailable
+            return None
+
+    try:
+        job = store.commit_job_result(
+            plan.task_id, owner=owner, summary=summary, terminal=terminal, error_code=code
+        )
+        return out(job.status.value, code,
+                   "result_committed_atomically; no auto requeue" if code else
+                   "succeeded; result committed atomically with status",
+                   rs=summary)
+    except StoreError as exc:
+        if exc.code in _STALE_CODES:
+            st = observed()
+            return out(st or "status_unknown", exc.code,
+                       "stale_or_cancelled_worker_result_not_committed", lease_lost=True)
+        persist_err = exc.code
+    except Exception as exc:  # noqa: BLE001 - sqlite/OS failure, maybe after COMMIT
+        persist_err = type(exc).__name__
+    # Persistence failed or uncertain: report only what the DB actually shows.
+    st = observed()
+    if st == JobStatus.SUCCEEDED.value and store_result_present(store, plan.task_id):
+        return out(st, code, "commit_outcome_uncertain_but_db_shows_committed", rs=summary)
+    if st == JobStatus.RUNNING.value:
+        try:
+            j = store.mark_needs_review(plan.task_id, error_code="result_persist_failed", owner=owner)
+            return out(j.status.value, "result_persist_failed",
+                       f"result_not_persisted({persist_err}); needs_review; no rerun")
+        except Exception:  # noqa: BLE001
+            st = observed()
+    if st in (JobStatus.RUNNING.value, JobStatus.SUCCEEDED.value):
+        st = None  # never claim success without a confirmed durable summary
+    return out(st or "status_unknown",
+               "result_persist_failed",
+               f"result_not_persisted({persist_err}); db state unconfirmed; no rerun")
+
+
+def store_result_present(store: JobStore, task_id: str) -> bool:
+    try:
+        return store.get_job_result(task_id) is not None
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _commit_result(

@@ -154,3 +154,37 @@ documented `--output-format json` object (whole stdout; noise ⇒ `not_json`).
 
 **10:00 CET run (v0.16.2):** the only evidence is process exit 0 (~26 s). The response,
 sessionId and cost were discarded by 0.16.2 and are unknown; they were not recovered and not rerun.
+
+## v0.16.4 — atomic result commit, strict schema, exact cost
+
+- Result, terminal status and outbox event are written in **one SQLite transaction**
+  (`commit_job_result`) and only by the current, unexpired lease owner of a RUNNING job.
+  Cancelled, terminal, needs_review, stale-owner or expired-lease workers commit nothing
+  (expired lease flips to needs_review without the result).
+- Persistence failure never yields `succeeded`: if the DB is reachable the job becomes
+  `needs_review/result_persist_failed`; if not, the CLI reports `status_unknown`
+  (no invented state). If COMMIT succeeded but the caller saw an error, the reported
+  status is read back from the DB. Never re-executes.
+- Stored summaries are strictly validated (`gbbb.grok_result_summary/v1`: exact keys,
+  types, bounds, consistency); invalid rows are neither written nor returned. Results live
+  in `job_results_v2` (PK task_id+attempt). The unvalidated 0.16.3 `job_results` table is
+  left in place and never read.
+- `total_cost_usd` is the exact decimal string from the JSON (parsed as Decimal, ≤18
+  decimals, no float rounding); ticks are exact integers.
+- Tolerated key variants (docs main vs. installed 1.0.70 unknown): `text|result`,
+  `stopReason|stop_reason`, `sessionId|session_id`; recorded as `schema_variant`.
+  Duplicate JSON keys are rejected.
+- `runner-run --parse-grok-json` / `--expect-bridge-ok` for generic jobs; such runs exit
+  non-zero unless the result was accepted.
+- MCP and outbox never carry result text or session id; `jobs-status` hides results
+  unless `--show-result`.
+- CI: installed-wheel end-to-end test (dummy JSON producer → durable DB → reopen →
+  hidden/shown status → outbox dry-run), Linux and Windows, no model, no network.
+
+### Next bounded plan (toward a usable app)
+1. Real job command `grok-bot-build-bridge ask` — one owner-approved prompt, parsed
+   result, explicit cost/turn caps, same isolation as the smoke (no model call until approved).
+2. Result retrieval via MCP behind an explicit, scoped opt-in (session id still redacted).
+3. Webhook send path behind existing `--send` gate with result-free payloads; dry-run first.
+4. Host install of the next tagged build only after user approval; one approved smoke to
+   confirm the real 1.0.70 JSON shape.

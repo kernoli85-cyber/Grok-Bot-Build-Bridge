@@ -177,3 +177,57 @@ def test_draft_plugin_manifest_official_shape():
     assert text.startswith("---")
     assert "name:" in text.split("---")[1]
     assert "description:" in text.split("---")[1]
+
+
+def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts, tmp_path):
+    """Installed wheel: dummy JSON producer -> durable state -> reopen -> hidden/shown -> outbox dry-run."""
+    import shutil
+    wheel, _ = built_artifacts
+    venv_dir = tmp_path / "venv"
+    venv.create(venv_dir, with_pip=True)
+    win = sys.platform.startswith("win")
+    py = venv_dir / ("Scripts/python.exe" if win else "bin/python")
+    exe = venv_dir / ("Scripts/grok-bot-build-bridge.exe" if win else "bin/grok-bot-build-bridge")
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    r = _run([str(py), "-m", "pip", "install", "--force-reinstall", "--no-deps", str(wheel)], env={**env, "PYTHONNOUSERSITE": "1"})
+    assert r.returncode == 0 and exe.exists(), r.stdout + r.stderr
+    env.update(PYTHONUTF8="1", PYTHONIOENCODING="utf-8", HTTPS_PROXY="http://127.0.0.1:9", HTTP_PROXY="http://127.0.0.1:9")
+    work = tmp_path / "work"
+    work.mkdir()
+    src = ROOT / "tests" / "fixtures" / "bridge-dummy-grokjson.py"
+    ok_dummy = work / "bridge-dummy-grokjson.py"
+    noise_dummy = work / "bridge-dummy-noise.py"
+    shutil.copy(src, ok_dummy)
+    shutil.copy(src, noise_dummy)
+    db = tmp_path / "state" / "state.db"
+
+    def cli(*a):
+        return _run([str(exe), *a], cwd=work, env=env)
+
+    def run(tid, dummy):
+        return cli("runner-run", "--state-db", str(db), "--task-id", tid, "--backend", "native",
+                   "--cwd", str(work), "--executable", str(dummy), "--expect-bridge-ok", "--execute")
+
+    r = run("ok1", ok_dummy)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = json.loads(r.stdout)
+    assert d["status"] == "succeeded" and d["process_exit_ok"] is True
+    assert d["result_summary"]["matched_text"] == "BRIDGE_OK"
+    assert d["result_summary"]["total_cost_usd"] == "0.0001"
+
+    r = run("noise1", noise_dummy)
+    d = json.loads(r.stdout)
+    assert r.returncode != 0 and d["process_exit_ok"] is True and d["status"] == "needs_review"
+    assert d["error_code"] == "success_exit_invalid_result"
+
+    # Reopen in fresh processes: hidden by default, shown on request.
+    r = cli("jobs-status", "--state-db", str(db))
+    assert r.returncode == 0 and "result_summary" not in r.stdout and "0d3f-AB_9" not in r.stdout
+    r = cli("jobs-status", "--state-db", str(db), "--show-result")
+    jobs = {j["task_id"]: j for j in json.loads(r.stdout)["jobs"]}
+    assert jobs["ok1"]["status"] == "succeeded" and jobs["ok1"]["result_summary"]["session_id"] == "0d3f-AB_9"
+    assert jobs["noise1"]["status"] == "needs_review" and jobs["noise1"]["result_summary"]["parse_status"] == "not_json"
+
+    r = cli("outbox-pump", "--state-db", str(db))  # dry-run default; no --send
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "0d3f-AB_9" not in r.stdout and "BRIDGE_OK" not in r.stdout
