@@ -244,7 +244,8 @@ def plan_repo_question(root: str, selections: list[str], *, limits: Limits = Lim
                 rel = f"{d}/{unicodedata.normalize('NFC', e.name)}"
                 low = e.name.lower()
                 try:
-                    est = e.stat(follow_symlinks=False)
+                    # Not DirEntry.stat(): on Windows its cached result has st_dev/st_nlink = 0.
+                    est = os.lstat(e.path)
                 except OSError:
                     skip(rel, "stat_failed")
                     continue
