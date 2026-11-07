@@ -290,6 +290,17 @@ def _result_sentence(r: dict | None) -> str:
     return " ".join(parts)
 
 
+def cmd_repo_plan(args: argparse.Namespace) -> int:
+    from .repo_plan import plan_repo_question, render_text
+    plan = plan_repo_question(args.root, list(args.select or []), reveal_paths=args.reveal_paths)
+    if args.format == "text":
+        sys.stdout.write(render_text(plan))
+    else:
+        json.dump(plan, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    return 0 if plan["status"] in {"planned", "partial"} else 2
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     from .doctor import render_text, run_doctor
     rep = run_doctor(mode="live" if args.live else "fixture", state_db=args.state_db)
@@ -1192,6 +1203,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--max-attempts", type=int, default=5)
     p_jobs.add_argument("--fail", action="store_true", help="Simulate failure+requeue")
     p_jobs.set_defaults(func=cmd_jobs_demo)
+
+    p_rp = sub.add_parser("repo-plan", help="Dry-run repo-question manifest plan (metadata only; reads no file contents)")
+    p_rp.add_argument("--root", required=True, help="Owner-selected absolute repo root (local)")
+    p_rp.add_argument("--select", action="append", default=[], help="Relative file/dir under root (repeatable; no wildcards)")
+    p_rp.add_argument("--reveal-paths", action="store_true", help="Include root and relative paths in output (owner-local only)")
+    p_rp.add_argument("--format", choices=["json", "text"], default="json")
+    p_rp.set_defaults(func=cmd_repo_plan)
 
     p_doc = sub.add_parser("doctor", help="Read-only companion report (fixture default; --live probes this machine)")
     p_doc.add_argument("--live", action="store_true", help="Probe the machine running this command (read-only)")

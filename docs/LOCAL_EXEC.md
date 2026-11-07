@@ -321,3 +321,45 @@ no Bash/Edit/Write/Web/MCP). The answer is returned transiently. After that come
 unified diff for human review, and nothing is applied to the real repo without an explicit
 `apply` step that the owner approves. Both need one approved real call first to confirm the
 1.0.70 JSON shape and the tool-denial semantics.
+
+## v0.20.0 — `repo-plan`: dry-run repository-question manifest (plan only)
+
+`repo-plan --root /abs/repo --select src/pkg --select README.md [--reveal-paths] [--format text]`
+(schema `gbbb.repo_question_plan/v1`; status `planned | partial | refused`).
+
+- **Metadata only:** uses `lstat`/`scandir`. It never opens, reads, hashes or copies a file,
+  creates no snapshot, temp dir or state, and invokes no git, hooks, submodules, package
+  managers or shell. Nothing goes to a model. Not exposed over MCP.
+- **Selections** are explicit relative paths. Wildcards and whole-tree selections are refused.
+  Lexical checks run the same on every platform: absolute, drive, drive-relative and UNC paths,
+  backslashes, `:` (ADS), `.`/`..`/empty components, trailing dot or space, Windows reserved
+  names, control characters, and case-insensitive duplicates are refused; names are NFC-normalized.
+- **Root:** absolute and an existing directory; the root and every parent must not be a
+  symlink or reparse point. Parents of a selection inside the root must be real directories.
+- **Always excluded:** `.git` (dir or worktree pointer file), `.gitmodules`, nested repos and
+  submodules; vendor/noise dirs; tool and rule dirs (`.grok`, `.claude`, `.cursor`, hooks);
+  credential dirs; secret-like files (`.env*`, keys, certs, `auth.json`, `credentials*`,
+  `config.toml`, tokens…). An explicit selection of a secret-like path refuses the whole plan.
+  Symlinks/reparse points, other filesystems (mount escapes), devices, FIFOs and sockets are
+  skipped. Hard links (`st_nlink > 1`) are skipped; this can exclude legitimate files and is reported.
+- **Limits before any read:** 200 files, 256 KiB per file, 2 MiB total, 5000 scanned entries,
+  depth 8, 32 selections. When a limit is hit the status is `partial`.
+- **Privacy:** by default the output has counts and skip reasons only, with no root, file names
+  or paths. `--reveal-paths` (owner-local) adds the root, the manifest (path and size) and up
+  to 200 skipped paths. File contents and hashes are never included.
+- **Honest limits:** TOCTOU means this preflight cannot secure a later copy; a snapshot step
+  must re-verify each file at descriptor level (no-follow open, identity check). Excluding files
+  is not model sandboxing: Grok's tool denial is documented upstream but unverified on 1.0.70.
+  AGENTS.md, CLAUDE.md and rules are untrusted data, never authority; instruction-like files
+  are counted.
+
+### Roadmap (secure coding bridge, no feature creep)
+1. **Blocked on owner:** one approved real `ask` on the host to confirm the 1.0.70 JSON shape
+   and the tool-denial behaviour (needs 0.20.0 installed there).
+2. **Snapshot transport design (unsolved):** the repo usually lives on Windows or in WSL, but
+   Grok runs inside WSL. A verified copy into a fresh `/tmp/gbbb-repo-*` inside WSL needs a
+   descriptor-safe copier on the side that owns the files plus a bounded transfer through
+   `wsl.exe` (no shell, no `\\wsl$` writes). This is a design problem on the per-user app
+   transport and must be solved before any repo `ask`.
+3. Repo-read-only `ask` on that snapshot, with Read/Grep only and only if step 1 proves the denial works.
+4. Proposed-diff mode inside the snapshot: bounded diff out, explicit owner `apply`, no auto-apply.
