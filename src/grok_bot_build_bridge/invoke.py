@@ -24,7 +24,10 @@ _COMMON = frozenset({
 })
 _ASK = _COMMON | {"prompt"}
 _CONTEXT = _COMMON | {"source", "files", "question"}
-_PROPOSE = (_COMMON - {"show_answer"}) | {"source", "files", "instruction", "show_proposal", "show_rejected_reply"}
+_PROPOSE = (_COMMON - {"show_answer"}) | {
+    "source", "files", "instruction", "show_proposal", "show_rejected_reply", "replacement_format",
+}
+_FORMATS = ("json-v1", "literal-v1")
 _MODEL_KEYS = frozenset({"id", "kind", "expect_usage_keys"})
 _EXE_BAD = set(";&|$`<>(){}[]!*?~#\\\"'\n\r\t ")
 
@@ -151,6 +154,11 @@ def _checked(obj: dict) -> dict:
     show = _bool(obj, "show_answer") if "show_answer" in obj or obj.get("op") != "propose" else False
     show_proposal = _bool(obj, "show_proposal") if obj.get("op") == "propose" else False
     show_rejected = _bool(obj, "show_rejected_reply") if obj.get("op") == "propose" else False
+    replacement_format = "json-v1"
+    if obj.get("op") == "propose" and "replacement_format" in obj:
+        replacement_format = obj["replacement_format"]
+        if replacement_format not in _FORMATS:
+            raise InvokeError("field_invalid", "replacement_format must be json-v1 or literal-v1")
     if show_rejected and not show_proposal:
         raise InvokeError("field_invalid", "show_rejected_reply requires show_proposal")
     if "confirm_send" in obj and not isinstance(obj["confirm_send"], str):
@@ -168,7 +176,8 @@ def _checked(obj: dict) -> dict:
     timeout = _timeout(obj)
     choice = _model_choice(obj, timeout)
     return {"execute": execute, "show": show, "show_proposal": show_proposal,
-            "show_rejected": show_rejected, "executable": executable, "timeout": timeout, "choice": choice}
+            "show_rejected": show_rejected, "replacement_format": replacement_format,
+            "executable": executable, "timeout": timeout, "choice": choice}
 
 
 def _shape(argv, prompt: str, placeholder: str) -> list[str]:
@@ -176,7 +185,7 @@ def _shape(argv, prompt: str, placeholder: str) -> list[str]:
 
 
 def _binding(op: str, executable: str, choice, timeout: float, selection: list[str], argv, placeholder, prompt: str,
-             *, show_rejected_reply: bool = False) -> dict:
+             *, show_rejected_reply: bool = False, replacement_format: str = "json-v1") -> dict:
     binding = {
         "op": op, "backend": "posix-local", "executable": executable,
         "executable_realpath": os.path.realpath(executable),
@@ -188,6 +197,7 @@ def _binding(op: str, executable: str, choice, timeout: float, selection: list[s
     }
     if op == "propose":
         binding["show_rejected_reply"] = bool(show_rejected_reply)
+        binding["replacement_format"] = replacement_format
     return binding
 
 
@@ -233,7 +243,8 @@ def _prepare(obj: dict, checked: dict) -> dict:
         if not all(isinstance(item, str) for item in files):
             raise InvokeError("field_invalid", "files must be strings")
         try:
-            packed, texts, skipped = stage_proposal(source, list(files), instruction, key)
+            packed, texts, skipped = stage_proposal(
+                source, list(files), instruction, key, checked["replacement_format"])
         except ContextError as exc:
             raise InvokeError(exc.code, exc.message) from None
         except SnapshotError as exc:
@@ -269,13 +280,15 @@ def _prepare(obj: dict, checked: dict) -> dict:
     except PL.RunnerError as exc:
         raise InvokeError(exc.code, exc.message) from None
     binding = _binding(obj["op"], executable, choice, timeout, selection, plan.argv, LOCAL_PLACEHOLDER_CWD, prompt,
-                       show_rejected_reply=bool(checked.get("show_rejected")))
+                       show_rejected_reply=bool(checked.get("show_rejected")),
+                       replacement_format=str(checked.get("replacement_format") or "json-v1"))
     return {
         "prompt": prompt, "selection": selection, "choice": choice, "timeout": timeout,
         "executable": executable, "token": _token(key, prompt, binding), "key_created": key_created,
         "summary": summary, "skipped": skipped, "plan": plan, "bases": bases, "key": key,
         "source": obj.get("source"), "files": list(obj.get("files") or []),
         "instruction": obj.get("instruction"),
+        "replacement_format": checked.get("replacement_format") or "json-v1",
     }
 
 
@@ -312,6 +325,7 @@ def run_invoke(raw: bytes) -> int:
             body["applied"] = False
             body["source_writes"] = False
             body["proposal_only"] = True
+            body["replacement_format"] = info["replacement_format"]
         return _out(body, 0)
 
     from .context_cli import LOCAL_PLACEHOLDER_CWD
@@ -350,7 +364,9 @@ def run_invoke(raw: bytes) -> int:
         body["status"] = "execution_" + res["status"]
         return _out(body, 3)
     from .context_pack import ContextError
-    from .proposal import ProposalError, model_text_diagnostic, parse_replacements, review, stage_proposal
+    from .proposal import (
+        ProposalError, model_text_diagnostic, parse_proposal, proposal_nonce, review, stage_proposal,
+    )
     from .snapshot_posix import SnapshotError
     diagnostic = model_text_diagnostic(
         captured, extraction_key=str(captured_meta.get("key") or "none"),
@@ -360,12 +376,14 @@ def run_invoke(raw: bytes) -> int:
         stdout_truncated=bool(res.get("stdout_truncated")))
     try:
         _packed, now, _skipped = stage_proposal(
-            info["source"], info["files"], info["instruction"], info["key"])
+            info["source"], info["files"], info["instruction"], info["key"], info["replacement_format"])
         if list(now) != list(info["bases"]):
             raise ProposalError("source_changed", "selected files changed during the call")
-        proposed = parse_replacements(captured or "", info["selection"])
+        nonce = proposal_nonce(info["key"], list(info["bases"]), str(info["instruction"] or "").strip())
+        proposed = parse_proposal(captured or "", info["selection"], fmt=info["replacement_format"], nonce=nonce)
         body["proposal"] = review(
-            info["selection"], dict(info["bases"]), proposed, info["key"], show=checked["show_proposal"])
+            info["selection"], dict(info["bases"]), proposed, info["key"],
+            show=checked["show_proposal"], fmt=info["replacement_format"])
     except (ProposalError, ContextError, SnapshotError) as exc:
         body["status"] = "proposal_rejected"
         proposal = {"schema": "gbbb.proposal/v1", "accepted": False, "applied": False,

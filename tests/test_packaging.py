@@ -390,6 +390,41 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert r.returncode == 0 and body["status"] == "proposal_accepted"
         assert body["proposal"]["applied"] is False and body["source_writes"] is False
         assert body["proposal"]["changed"] is True and pfile.read_bytes() == before
+        lit = psrc / "notes" / "q.txt"
+        lit.write_text('QUOTES = \'""""\'\nNOTE = r"line\\nbreak"\n')
+        lit_before = lit.read_bytes()
+        lit_dummy = tmp_path / "lit-bin" / "grok"
+        lit_dummy.parent.mkdir(mode=0o755)
+        script = "\n".join([
+            "#!" + sys.executable,
+            "import json, os, re, sys",
+            "prompt = sys.argv[sys.argv.index('--single') + 1]",
+            "nonce = re.search(r'The framing nonce is ([0-9a-f]{16})', prompt).group(1)",
+            "content = " + repr(lit.read_text()),
+            "body = (",
+            "    'GBBB-REPLACEMENTS 1 ' + nonce + '\\n'",
+            "    + 'FILE ' + nonce + ' path=notes/q.txt\\n' + content",
+            "    + '\\nEND ' + nonce + ' path=notes/q.txt\\n'",
+            "    + 'END-REPLACEMENTS ' + nonce + '\\n'",
+            ")",
+            "assert '--sandbox' in sys.argv and os.listdir('.') == []",
+            "print(json.dumps({'text': body, 'stopReason': 'end_turn', 'num_turns': 1,",
+            " 'usage': {'input_tokens': 1, 'output_tokens': 1},",
+            " 'modelUsage': {'provider-model-id': {}}}))",
+            "",
+        ])
+        lit_dummy.write_text(script)
+        lit_dummy.chmod(0o755)
+        lit_env = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(lit_dummy),
+                   "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/q.txt"],
+                   "instruction": "Keep the text.", "replacement_format": "literal-v1"}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(lit_env))
+        tok = json.loads(r.stdout)["consent_token"]
+        lit_env.update(execute=True, allow_model_call=True, confirm_send=tok, show_proposal=True)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(lit_env))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
+        assert body["proposal"]["format"] == "literal-v1" and lit.read_bytes() == lit_before
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

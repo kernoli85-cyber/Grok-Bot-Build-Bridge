@@ -145,11 +145,11 @@ def test_change_during_call_is_not_applied(monkeypatch, tmp_path, capsys):
     real_stage = __import__("grok_bot_build_bridge.proposal", fromlist=["stage_proposal"]).stage_proposal
     calls = {"n": 0}
 
-    def wrapped(source, files, instruction, key):
+    def wrapped(source, files, instruction, key, fmt="json-v1"):
         calls["n"] += 1
         if calls["n"] >= 2:
             path.write_text("during\n")
-        return real_stage(source, files, instruction, key)
+        return real_stage(source, files, instruction, key, fmt)
 
     monkeypatch.setattr("grok_bot_build_bridge.proposal.stage_proposal", wrapped)
     sent = _body(dummy, src, execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
@@ -279,3 +279,60 @@ def test_result_field_and_prose_diagnostic_do_not_echo_text(monkeypatch, tmp_pat
                       execute=True, allow_model_call=True, confirm_send=dry["consent_token"])
     code, mismatch = _run(sent_flip, capsys)
     assert code == 2 and mismatch["error"]["code"] == "consent_mismatch"
+
+
+def test_literal_format_preserves_quotes_and_binds_format(monkeypatch, tmp_path, capsys):
+    from grok_bot_build_bridge.proposal import proposal_nonce
+
+    _env(monkeypatch, tmp_path)
+    rich = "\n".join([
+        '"""Synthetic calculator fixture."""',
+        "def add(a, b):",
+        "    return a - b",
+        'QUOTES = ' + chr(39) + '"' * 4 + chr(39),
+        'MARK = "```fence```"',
+        r'NOTE = r"line\nbreak"',
+        'WORD = "café ✓"',
+        "",
+    ])
+    src = tmp_path / "src"
+    src.mkdir()
+    os.chmod(src, 0o755)
+    (src / "calc.py").write_text(rich)
+    before = (src / "calc.py").read_bytes()
+    proposed = rich.replace("return a - b", "return a + b")
+    from grok_bot_build_bridge.context_pack import load_or_create_consent_key
+    from grok_bot_build_bridge.state.paths import user_config_root
+    key, _ = load_or_create_consent_key(str(user_config_root() / "consent.key"))
+    from grok_bot_build_bridge.proposal import stage_proposal
+    packed, _texts, _skipped = stage_proposal(
+        str(src), ["calc.py"], "Change add to return a + b. Keep the rest.", key, "literal-v1")
+    assert "NOT_IN_CONTEXT" not in packed.prompt and "Do not use JSON" in packed.prompt
+    nonce = proposal_nonce(key, [("calc.py", rich)], "Change add to return a + b. Keep the rest.")
+    assert nonce in packed.prompt
+    frame = _frame(nonce, [("calc.py", proposed)])
+    dummy = _dummy(tmp_path / "literal", frame)
+    base = _body(dummy, src, files=["calc.py"], instruction="Change add to return a + b. Keep the rest.",
+                 replacement_format="literal-v1")
+    code, dry = _run(base, capsys)
+    assert code == 0 and dry["replacement_format"] == "literal-v1"
+    assert "NOT_IN_CONTEXT" not in json.dumps(dry)
+    sent = dict(base, execute=True, allow_model_call=True, confirm_send=dry["consent_token"], show_proposal=True)
+    code, done = _run(sent, capsys)
+    assert code == 0 and done["status"] == "proposal_accepted" and done["proposal"]["format"] == "literal-v1"
+    assert "return a + b" in done["proposal"]["files"][0]["diff"]
+    assert (src / "calc.py").read_bytes() == before
+    flipped = dict(base, replacement_format="json-v1", execute=True, allow_model_call=True,
+                   confirm_send=dry["consent_token"])
+    code, bad = _run(flipped, capsys)
+    assert code == 2 and bad["error"]["code"] == "consent_mismatch"
+    assert (src / "calc.py").read_bytes() == before
+
+
+def _frame(nonce, items):
+    chunks = [f"GBBB-REPLACEMENTS 1 {nonce}"]
+    for path, content in items:
+        chunks.append(f"FILE {nonce} path={path}\n{content}")
+        chunks.append(f"END {nonce} path={path}")
+    chunks.append(f"END-REPLACEMENTS {nonce}")
+    return "\n".join(chunks) + "\n"

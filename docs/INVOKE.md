@@ -11,7 +11,7 @@ In the distro, as the non-root user who will run grok:
 ```bash
 python3 -m venv "$HOME/.venv"
 "$HOME/.venv/bin/python" -m pip install --upgrade pip
-"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.32.3-py3-none-any.whl
+"$HOME/.venv/bin/python" -m pip install /path/to/grok_bot_build_bridge-0.33.0-py3-none-any.whl
 ```
 
 The absolute path `$HOME/.venv/bin/grok-bot-build-bridge` is the only companion path Windows needs. The first dry-run creates `$HOME/.config/grok-bot-build-bridge/consent.key` (mode 0600). There is no model-settings file for this command. The model id and the expected `modelUsage` key travel in the request.
@@ -67,7 +67,21 @@ Success requires Grok's `modelUsage` keys to be within the declared id and `expe
 
 `propose` asks the same protected no-tools runner for a full-file replacement of the explicitly selected POSIX text files. The instruction is plain text, like a question. It cannot add paths, flags, or commands.
 
-The model text is untrusted. The prompt tells the model to return exactly one JSON object with both required keys:
+`replacement_format` is `json-v1` when omitted, or `literal-v1`. The consent token binds the choice. `json-v1` is still the strict object with `schema` and `files`; quotes inside file text must be JSON escapes, and invalid JSON is rejected rather than repaired.
+
+`literal-v1` asks for exact file characters between marker lines. The nonce comes from the prompt. A framing line inside the file text is `proposal_delimiter_collision`. A missing selected path is `proposal_partial`. Text outside the framing is `proposal_chatter`. This is the format to use when the file contains quotes, backslashes, or triple-quoted strings.
+
+```
+GBBB-REPLACEMENTS 1 <nonce>
+FILE <nonce> path=calc.py
+<exact file text>
+END <nonce> path=calc.py
+END-REPLACEMENTS <nonce>
+```
+
+The newline before `END` is not part of the file. There is still no apply step.
+
+The model text is untrusted. For `json-v1`, the prompt tells the model to return exactly one JSON object with both required keys:
 
 ```json
 {"schema":"gbbb.file_replacements/v1","files":[{"path":"notes/a.txt","content":"full file text\n"}]}
@@ -91,7 +105,8 @@ Nothing in this response writes the source tree, commits, or applies the edit. `
   "model": {"id": "LM-Studio", "kind": "custom_local", "expect_usage_keys": ["provider-model-id"]},
   "source": "/home/gbbbdemo/work",
   "files": ["notes/a.txt"],
-  "instruction": "Replace the word alpha with beta."
+  "instruction": "Replace the word alpha with beta.",
+  "replacement_format": "literal-v1"
 }
 ```
 
