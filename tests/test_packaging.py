@@ -258,6 +258,14 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     ghost_db = tmp_path / "ghost" / "s.db"
     assert cli("jobs-status", "--state-db", str(ghost_db)).returncode == 2 and not ghost_db.parent.exists()
 
+    # doctor from the installed wheel: fixture default, read-only state check, no creation.
+    r = cli("doctor", "--format", "text", "--state-db", str(db))
+    assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout
+    assert "readiness for a real model call is unknown" in r.stdout
+    nodb = tmp_path / "doc" / "s.db"
+    r = cli("doctor", "--state-db", str(nodb))
+    assert r.returncode == 0 and not nodb.parent.exists()
+
     r = cli("outbox-pump", "--state-db", str(db))  # dry-run default; no --send
     assert r.returncode == 0, r.stdout + r.stderr
     assert "0d3f-AB_9" not in r.stdout and "BRIDGE_OK" not in r.stdout

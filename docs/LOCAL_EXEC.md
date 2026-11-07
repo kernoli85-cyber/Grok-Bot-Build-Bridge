@@ -235,12 +235,8 @@ Before 0.18.0 both opened the DB through `JobStore(...)`, whose constructor runs
 `CREATE TABLE IF NOT EXISTS`, so a "status" read could migrate (write to) the file. That is fixed.
 - A missing DB is reported (`state_db_absent`) and never created. Symlinks, non-SQLite files and
   foreign or too-old schemas give clear error codes; errors never echo paths or raw SQLite text.
-- WAL tradeoff: if no `-wal` sidecar exists (the normal state after a clean shutdown), the DB is
-  opened `mode=ro&immutable=1`. No sidecars are created and no locks are taken, but a writer
-  starting at the same moment could give a stale read. If a `-wal` exists (a writer is active or
-  crashed), the DB is opened `mode=ro`: the main file is not written, but SQLite may update or
-  create the `-shm` index. Tests confirm that main-file hash, mtime and mode stay unchanged and
-  that no sidecars appear in the at-rest case.
+- WAL tradeoff: **superseded in v0.19.0** (the heuristic `immutable=1` choice was unsafe;
+  see below).
 - Result rows are re-validated against the strict v1 schema on read; tampered rows are hidden.
 
 **`jobs-status`**: `--task-id` filters in SQL (an unknown id exits with 3; there is no fallback to
@@ -281,3 +277,47 @@ producers only. The next useful step that needs the owner is: install 0.18.0 on 
 one approved `ask --format text --show-answer`. Box-side next steps: a `doctor` command that
 checks host prerequisites read-only in one report, and a minimal repo-read-only `ask` design
 document (no code-writing).
+
+
+## v0.19.0 — connection lifecycle fix, honest read-only mode, `doctor`
+
+**Connection leak fixed.** `with sqlite3.connect(...)` only scopes a transaction; it does not
+close the handle. Six `JobStore` read paths and the schema init leaked connections until garbage
+collection, which kept WAL sidecars alive and can block rename/delete on Windows. All paths now
+use `_conn()` / `_tx()`, which always close, also on exceptions. A failed `ROLLBACK` no longer
+masks the original error. Tests spy on every `sqlite3.connect` (count opened = closed, including
+failing transactions and worker heartbeat threads), rename and delete the DB after use, and
+check that WAL sidecars disappear after the last close with GC disabled and no forced checkpoint.
+
+**Read-only mode corrected.** v0.18.0 chose `immutable=1` whenever no `-wal` file existed.
+That was unsafe: SQLite's immutable flag promises the file never changes, and a writer can start
+after the check (TOCTOU). It is now:
+- Always `mode=ro` + `PRAGMA query_only`, inside one deferred read transaction per reader, so
+  every query sees one coherent snapshot. A test commits result + terminal status + outbox from
+  a writer between reader queries; the reader keeps seeing the old state, never a mix.
+- Honest effect: the **main DB file is never modified**. Because the DB uses WAL, SQLite **may
+  create or update the `-shm`/`-wal` sidecar files** for the reader. This is not a "no filesystem
+  changes" mode.
+- `immutable=1` is used only with `jobs-status --assume-static-snapshot`, meaning the operator
+  has verified the file is a static copy nobody writes. It is never chosen automatically and is
+  not available over MCP.
+
+**`doctor`** (read-only companion report): `doctor [--live] [--state-db PATH] [--format text]`.
+- The default is **fixture**: packaged demo facts, labelled as not this machine and not the user's PC.
+- `--live` runs the existing read-only discovery on the machine running the command. On the
+  Grok Bot box that is Linux, and the report says it cannot diagnose a Windows PC.
+- Each check reports one of `ok | not_ready | absent | unknown | skipped`: companion version,
+  MCP extra, native grok, WSL distros (stopped distros are never started), WSL grok, probe
+  timeouts, state DB (read-only, never created) and model auth.
+- Model auth is always `unknown`. `capabilities.model_auth_verified` is always false, and
+  `model_call_ready` is "unknown". Doctor makes no model, auth, network or secret reads, writes
+  no preferences, installs nothing and does not create state.
+
+### Next milestone toward the original goal (secure coding bridge)
+A **repo-read-only `ask`**: Grok may read files in one operator-allowlisted repo snapshot
+(copied into a fresh temp dir, never the live repo), with read-only tools only (Read/Grep, still
+no Bash/Edit/Write/Web/MCP). The answer is returned transiently. After that comes a
+**proposed-diff** mode: Grok writes only inside the temp copy, the bridge returns a bounded
+unified diff for human review, and nothing is applied to the real repo without an explicit
+`apply` step that the owner approves. Both need one approved real call first to confirm the
+1.0.70 JSON shape and the tool-denial semantics.

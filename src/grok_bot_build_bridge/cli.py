@@ -290,6 +290,17 @@ def _result_sentence(r: dict | None) -> str:
     return " ".join(parts)
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    from .doctor import render_text, run_doctor
+    rep = run_doctor(mode="live" if args.live else "fixture", state_db=args.state_db)
+    if args.format == "text":
+        sys.stdout.write(render_text(rep))
+    else:
+        json.dump(rep, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+    return 0
+
+
 def cmd_jobs_status(args: argparse.Namespace) -> int:
     """Strictly read-only (never creates or migrates the DB)."""
     from .mcp_facade.scope import ScopeError, validate_task_id
@@ -313,7 +324,7 @@ def cmd_jobs_status(args: argparse.Namespace) -> int:
             return _err(exc.code, exc.message, 2)
     show = bool(args.show_result)
     try:
-        with ReadOnlyState(args.state_db) as ro:
+        with ReadOnlyState(args.state_db, assume_static_snapshot=args.assume_static_snapshot) as ro:
             if tid is not None:
                 job = ro.get_job(tid)
                 if job is None:
@@ -1182,6 +1193,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_jobs.add_argument("--fail", action="store_true", help="Simulate failure+requeue")
     p_jobs.set_defaults(func=cmd_jobs_demo)
 
+    p_doc = sub.add_parser("doctor", help="Read-only companion report (fixture default; --live probes this machine)")
+    p_doc.add_argument("--live", action="store_true", help="Probe the machine running this command (read-only)")
+    p_doc.add_argument("--state-db", default=None, help="Existing state DB to check read-only (never created)")
+    p_doc.add_argument("--format", choices=["json", "text"], default="json")
+    p_doc.set_defaults(func=cmd_doctor)
+
     p_status = sub.add_parser("jobs-status", help="Inspect jobs/outbox in a state DB")
     p_status.add_argument("--state-db", required=True)
     p_status.add_argument("--show-result", action="store_true", help="Include allowlisted result summary (default hidden)")
@@ -1189,6 +1206,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.add_argument("--limit", type=int, default=50, help="Max jobs/events (1..500)")
     p_status.add_argument("--offset", type=int, default=0)
     p_status.add_argument("--format", choices=["json", "text"], default="json")
+    p_status.add_argument("--assume-static-snapshot", action="store_true",
+                          help="Operator asserts the DB file is a static copy nobody writes (opens immutable, no sidecars). Wrong results if false.")
     p_status.set_defaults(func=cmd_jobs_status)
 
     p_tick = sub.add_parser(

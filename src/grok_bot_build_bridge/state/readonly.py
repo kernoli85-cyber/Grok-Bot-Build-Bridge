@@ -1,16 +1,19 @@
-"""Strictly read-only access to an existing bridge state DB (CLI status + MCP).
+"""Read-only access to an existing bridge state DB (CLI status + MCP).
 
-Never creates, migrates or writes the main DB. ``JobStore(...)`` must NOT be used for
+Never creates, migrates or writes the MAIN DB file. ``JobStore(...)`` must NOT be used for
 reads because its constructor runs CREATE TABLE IF NOT EXISTS (a write/migration).
 
-WAL tradeoff (SQLite >= 3.22, verified empirically on 3.46):
-- DB in WAL mode with NO ``-wal`` sidecar present (clean shutdown, the normal at-rest
-  state): opened with ``mode=ro&immutable=1`` -> no sidecar files are created and no
-  locks taken. Risk: if a writer starts concurrently, this read may see a stale or
-  torn snapshot; errors are reported as ``state_db_unreadable``, never as data.
-- ``-wal`` sidecar present (a writer is active or crashed): opened with ``mode=ro``.
-  The main DB is not written, but SQLite may update the EXISTING ``-shm`` index and
-  may create a missing ``-shm``. This is documented, not hidden.
+Mode (default, always): SQLite ``mode=ro`` + ``PRAGMA query_only`` and ONE deferred read
+transaction for the whole ReadOnlyState lifetime, so every query sees the same coherent
+snapshot even while a writer commits. Honest filesystem effect: the DB uses WAL, so SQLite
+may create or update the ``-shm``/``-wal`` sidecar files next to it (needed for WAL
+readers); the main file is not modified. If the directory is not writable and no ``-shm``
+exists, the open fails and is reported, not worked around.
+
+``immutable=1`` (no sidecars, no locks) is used ONLY when the caller passes
+``assume_static_snapshot=True`` -- meaning the operator has verified the file is a static
+copy that no process will write. It is never chosen heuristically: per SQLite docs,
+immutable on a file that changes can return wrong results.
 Errors never echo filesystem paths or raw SQLite messages.
 """
 from __future__ import annotations
@@ -40,13 +43,14 @@ class ReadOnlyStateError(Exception):
 
 @dataclass(frozen=True)
 class OpenInfo:
-    access_mode: str  # "immutable" | "ro_with_existing_wal"
+    access_mode: str  # "ro_snapshot" | "immutable_operator_asserted"
     has_results_table: bool
 
 
 class ReadOnlyState:
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: Path | str, *, assume_static_snapshot: bool = False) -> None:
         self._path = Path(db_path)
+        self._static = bool(assume_static_snapshot)
         self._conn: sqlite3.Connection | None = None
         self.info: OpenInfo | None = None
 
@@ -59,8 +63,14 @@ class ReadOnlyState:
 
     def close(self) -> None:
         if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+            try:
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")  # read txn only; nothing to commit
+            except sqlite3.Error:
+                pass
+            finally:
+                self._conn.close()
+                self._conn = None
 
     def open(self) -> OpenInfo:
         p = self._path
@@ -79,27 +89,31 @@ class ReadOnlyState:
             raise ReadOnlyStateError("state_db_unreadable", "state DB cannot be read") from None
         if len(header) < 100 or not header.startswith(b"SQLite format 3\x00"):
             raise ReadOnlyStateError("state_db_invalid", "file is not a SQLite database")
-        is_wal = header[18] == 2 or header[19] == 2
-        wal_present = os.path.exists(str(p) + "-wal")
         uri = p.resolve().as_uri() + "?mode=ro"
-        mode = "ro_with_existing_wal" if (is_wal and wal_present) else "immutable"
-        if mode == "immutable":
+        mode = "immutable_operator_asserted" if self._static else "ro_snapshot"
+        if self._static:
             uri += "&immutable=1"
+        conn = None
         try:
             conn = sqlite3.connect(uri, uri=True, isolation_level=None)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only=ON")
+            conn.execute("BEGIN")  # deferred: snapshot starts at first read below
             tables = {r[0] for r in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")}
             if "jobs" not in tables or "outbox" not in tables:
-                conn.close()
                 raise ReadOnlyStateError("state_db_schema_unsupported", "jobs/outbox tables missing")
             jcols = {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
             ocols = {r[1] for r in conn.execute("PRAGMA table_info(outbox)")}
             if not (_REQUIRED_JOB_COLS <= jcols and _REQUIRED_OUTBOX_COLS <= ocols):
-                conn.close()
                 raise ReadOnlyStateError("state_db_schema_unsupported", "unexpected jobs/outbox schema")
+        except ReadOnlyStateError:
+            if conn is not None:
+                conn.close()
+            raise
         except sqlite3.Error:
+            if conn is not None:
+                conn.close()
             raise ReadOnlyStateError("state_db_unreadable", "state DB could not be read") from None
         self._conn = conn
         self.info = OpenInfo(access_mode=mode, has_results_table="job_results_v2" in tables)

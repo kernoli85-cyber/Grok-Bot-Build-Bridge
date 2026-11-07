@@ -42,8 +42,9 @@ def _make_db(d: Path, n_plain: int = 2) -> Path:
 
 
 def _snapshot(d: Path):
-    return {p.name: (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns, p.stat().st_mode)
-            for p in sorted(d.iterdir())}
+    """Main DB file only. WAL sidecars (-shm/-wal) may legitimately appear for ro readers."""
+    p = d / "state.sqlite"
+    return (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns, p.stat().st_mode)
 
 
 # ---------- ReadOnlyState ----------
@@ -58,9 +59,8 @@ def test_ro_absent_never_created(tmp_path):
 def test_ro_no_mutation_no_sidecars(tmp_path):
     db = _make_db(tmp_path / "s")
     before = _snapshot(tmp_path / "s")
-    assert set(before) == {"state.sqlite"}  # WAL at rest: no sidecars
     with ReadOnlyState(db) as ro:
-        assert ro.info.access_mode == "immutable"
+        assert ro.info.access_mode == "ro_snapshot"
         assert ro.get_job("res-1")["status"] == "succeeded"
         assert ro.get_result("res-1")["session_id"] == "sess-PRIVATE-9"
     assert _snapshot(tmp_path / "s") == before
@@ -74,7 +74,7 @@ def test_ro_with_live_writer_uses_ro_mode(tmp_path):
     try:
         if os.path.exists(str(db) + "-wal"):
             with ReadOnlyState(db) as ro:
-                assert ro.info.access_mode == "ro_with_existing_wal"
+                assert ro.info.access_mode == "ro_snapshot"
                 assert ro.get_job("res-1") is not None
     finally:
         w.close()
@@ -305,3 +305,33 @@ def test_mcp_asgi_result_tool(tmp_path, monkeypatch, enabled):
                             assert res.isError
     asyncio.run(body())
     assert _snapshot(tmp_path / "s") == before
+
+
+def test_static_snapshot_only_when_operator_asserts(tmp_path):
+    db = _make_db(tmp_path / "s")
+    names = sorted(x.name for x in (tmp_path / "s").iterdir())
+    with ReadOnlyState(db, assume_static_snapshot=True) as ro:
+        assert ro.info.access_mode == "immutable_operator_asserted"
+        assert ro.get_job("res-1") is not None
+    assert sorted(x.name for x in (tmp_path / "s").iterdir()) == names  # no sidecars
+
+
+def test_reader_snapshot_coherent_under_concurrent_writer(tmp_path):
+    """A writer finishing the job between reader queries must not produce a mixed view."""
+    from grok_bot_build_bridge.state import JobStatus
+    from grok_bot_build_bridge.runner.grok_result import parse_grok_json_result
+    db = tmp_path / "c" / "state.sqlite"
+    db.parent.mkdir()
+    st = JobStore(db)
+    st.enqueue_job(task_id="c1", backend="wsl", cwd="/tmp")
+    st.claim_job("c1", owner="w", lease_sec=300)
+    st.mark_running("c1", owner="w")
+    with ReadOnlyState(db) as ro:
+        assert ro.get_job("c1")["status"] == "running"  # snapshot pinned here
+        summary = parse_grok_json_result(OUT).to_dict()
+        st.commit_job_result("c1", owner="w", summary=summary, terminal=JobStatus.SUCCEEDED)
+        assert ro.get_job("c1")["status"] == "running"
+        assert ro.get_result("c1") is None
+        assert all(e["event_type"] != "job.succeeded" for e in ro.outbox_for("c1"))
+    with ReadOnlyState(db) as ro:
+        assert ro.get_job("c1")["status"] == "succeeded" and ro.get_result("c1") is not None

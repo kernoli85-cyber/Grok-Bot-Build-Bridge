@@ -125,12 +125,16 @@ class JobStore:
     def _connect(self) -> sqlite3.Connection:
         ensure_private_db_file(self.db_path)
         conn = sqlite3.connect(str(self.db_path), isolation_level=None)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys=ON")
+        except BaseException:
+            conn.close()
+            raise
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._conn() as conn:
             conn.executescript(SCHEMA_SQL)
             conn.execute(
                 "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
@@ -139,15 +143,30 @@ class JobStore:
         ensure_private_db_file(self.db_path)
 
     @contextmanager
+    def _conn(self) -> Iterator[sqlite3.Connection]:
+        """Autocommit connection that is ALWAYS closed (``with sqlite3.connect()``
+        alone only scopes a transaction and leaks the handle until GC)."""
+        conn = self._connect()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
     def _tx(self) -> Iterator[sqlite3.Connection]:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            yield conn
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
+            try:
+                yield conn
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except sqlite3.Error:
+                        pass  # original error wins; close() discards the txn anyway
+                raise
         finally:
             conn.close()
 
@@ -368,7 +387,7 @@ class JobStore:
         """Latest validated result for a task (v2 only); invalid rows are not returned."""
         from ..runner.grok_result import validate_summary
 
-        with self._connect() as conn:
+        with self._conn() as conn:
             row = conn.execute(
                 "SELECT summary_json FROM job_results_v2 WHERE task_id = ?"
                 " ORDER BY attempt DESC LIMIT 1",
@@ -383,14 +402,14 @@ class JobStore:
         return d if validate_summary(d) else None
 
     def get_job(self, task_id: str) -> JobRecord | None:
-        with self._connect() as conn:
+        with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM jobs WHERE task_id = ?", (task_id,)
             ).fetchone()
             return self._row_job(row) if row else None
 
     def list_jobs(self, *, status: JobStatus | None = None) -> list[JobRecord]:
-        with self._connect() as conn:
+        with self._conn() as conn:
             if status is None:
                 rows = conn.execute(
                     "SELECT * FROM jobs ORDER BY created_at ASC"
@@ -885,7 +904,7 @@ class JobStore:
     def list_outbox(
         self, *, delivery: DeliveryState | None = None
     ) -> list[OutboxEvent]:
-        with self._connect() as conn:
+        with self._conn() as conn:
             if delivery is None:
                 rows = conn.execute(
                     "SELECT * FROM outbox ORDER BY created_at ASC"
@@ -899,7 +918,7 @@ class JobStore:
 
     def due_outbox(self, *, limit: int = 50) -> list[OutboxEvent]:
         now = self.clock.time()
-        with self._connect() as conn:
+        with self._conn() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM outbox
