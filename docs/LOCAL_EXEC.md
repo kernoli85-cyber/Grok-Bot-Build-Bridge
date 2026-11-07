@@ -106,13 +106,31 @@ distro is `Running` (never starts it); root refused. Runs `/usr/bin/printf` only
 `grok_executed=false`. Outbox events are then inspectable with `outbox-pump` (dry-run default).
 Real Grok jobs through `wsl_exe` are a separate future gate.
 
-## Grok one-shot smoke (v0.16.1, plan only)
+## Grok one-shot smoke (v0.16.2)
 
-Verified on host `grok 1.0.70` help: `--single`, `--max-turns`, `--output-format json`,
-`--disallowed-tools`, `--disable-web-search`, `--no-subagents`, `--no-plan`, `--sandbox`,
-`--permission-mode`. **No cost/token cap flag exists**; `--max-turns 1` caps turns only.
-Docs (newer) say MCP meta-tools are not removed by `--disallowed-tools`; `--no-memory` is in
-newer docs but absent from 1.0.70 help (not used).
+**Verified on host (grok 1.0.70 `--help`, flag names only):** `--single`, `--max-turns`,
+`--output-format json`, `--tools`, `--disallowed-tools`, `--deny`, `--disable-web-search`,
+`--no-subagents`, `--no-plan`, `--sandbox <PROFILE>`, `--permission-mode` (incl. `dontAsk`).
+No cost/token cap flag. `grok usage` exists for post-hoc spend.
 
-`runner-run --wsl-grok-smoke ...` prints the fixed plan; `--execute` returns `model_call_gated`.
-Running the model needs explicit owner approval of one call with unknown cost.
+**From public main-branch docs (may be newer than 1.0.70; unverified until a real run):**
+- `--tools` is an allowlist, but stock profiles inject optional tools and **MCP meta-tools
+  stay on**; an empty/"none" allowlist is **not documented** -> not used.
+- Bare deny rules (`--deny MCPTool`, `Bash`, `Read`, `Edit`, `Write`, `Grep`, `WebFetch`)
+  match all invocations and beat read-only auto-approval; `dontAsk` auto-denies unmatched calls.
+- `--sandbox strict`: reads CWD + system paths + `~/.grok`; refuses to start if the kernel
+  policy cannot be applied. `read-only` reads **everywhere** (previous plan; removed).
+- Project `AGENTS.md` needs folder trust; **home rules (`~/.grok/rules`, `~/.claude`,
+  `~/.cursor`), user skills, and natively configured MCP servers in `~/.grok/config.toml`
+  still load** - cwd does not control them. Env switches used: `GROK_MEMORY=0`,
+  `GROK_{CLAUDE,CURSOR}_{MCPS,SKILLS}_ENABLED=false`, `GROK_DISABLE_AUTOUPDATER=1`.
+  Native MCP servers may still be **started** (processes) even though their tool calls are denied.
+- JSON result reports `total_cost_usd` / `usage` after the run.
+
+**Plan:** cwd must be a fresh empty `/tmp/gbbb-smoke-<random>` (home/repo refused).
+Dry-run by default; a real call needs `--execute --allow-model-call` (default off) and a
+`Running` distro. This is protection by flags/rules, **not** proven isolation.
+
+Recommended read-only pre-check before any model call (no model, needs host approval):
+`grok inspect --cwd /tmp/gbbb-smoke-<random>` and `grok mcp list` to see which MCP
+servers/skills/rules would load.

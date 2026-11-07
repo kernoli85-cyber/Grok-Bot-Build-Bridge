@@ -360,23 +360,40 @@ def require_wsl_distro_running(distro: str, wsl_list_text: str) -> None:
     raise PlanError("wsl_distro_not_listed", f"distro {distro!r} not in wsl -l -v output")
 
 
-# --- Real Grok one-shot smoke plan via wsl.exe (planning only in this slice) ---
-# Flags verified against `grok --help` of grok 1.0.70 on the operator host (2026-11-07).
+# --- Real Grok one-shot smoke plan via wsl.exe ---
+# Flag NAMES verified against `grok --help` of grok 1.0.70 on the operator host
+# (2026-11-07). Flag SEMANTICS below come from public main-branch docs, which may
+# be newer than 1.0.70 -> labelled unverified until observed in a real run.
 GROK_SMOKE_PROMPT = "Antworte nur BRIDGE_OK"
 GROK_DENY_BUILTIN_TOOLS = (
     "run_terminal_cmd,read_file,grep,list_dir,search_replace,web_search,"
     "web_fetch,todo_write,task,Agent"
 )
+# Bare-prefix deny rules match ALL invocations of that type (docs); deny beats
+# read-only auto-approval and every allow. MCPTool covers MCP meta/server tools,
+# which --tools/--disallowed-tools do NOT remove.
+GROK_SMOKE_DENY_RULES = ("Bash", "Read", "Edit", "Write", "Grep", "WebFetch", "MCPTool")
+# Env passed via /usr/bin/env inside WSL. Only documented switches; they do NOT
+# stop servers configured natively in ~/.grok/config.toml from being started.
+GROK_SMOKE_ENV = (
+    "GROK_MEMORY=0",
+    "GROK_CLAUDE_MCPS_ENABLED=false",
+    "GROK_CURSOR_MCPS_ENABLED=false",
+    "GROK_CLAUDE_SKILLS_ENABLED=false",
+    "GROK_CURSOR_SKILLS_ENABLED=false",
+    "GROK_DISABLE_AUTOUPDATER=1",
+)
 GROK_SMOKE_FIXED_FLAGS = (
     "--max-turns", "1",                      # turn cap - NOT a cost/token cap
-    "--output-format", "json",               # json carries usage/cost if reported
+    "--output-format", "json",               # result carries total_cost_usd/usage (docs)
     "--disallowed-tools", GROK_DENY_BUILTIN_TOOLS,
     "--disable-web-search",
     "--no-subagents",
     "--no-plan",
-    "--sandbox", "read-only",
-    "--permission-mode", "default",          # never bypassPermissions / --always-approve
+    "--sandbox", "strict",                   # reads limited to CWD+system+~/.grok; refuses start if kernel policy unavailable (docs)
+    "--permission-mode", "dontAsk",          # unmatched calls auto-denied; never bypassPermissions/--always-approve
 )
+_SMOKE_CWD = re.compile(r"^/tmp/gbbb-smoke-[A-Za-z0-9]{6,32}$")
 
 
 def build_wsl_grok_smoke_plan(
@@ -388,31 +405,38 @@ def build_wsl_grok_smoke_plan(
     cwd: str,
     timeout_sec: float = 90.0,
 ) -> ApprovedExecutionPlan:
-    """Fixed headless one-shot Grok smoke via wsl.exe. Prompt and flags are not operator-editable.
+    """Fixed headless one-shot Grok smoke via wsl.exe. Prompt/flags not operator-editable.
 
-    Limits (truthful): --max-turns caps turns, not spend; grok 1.0.70 exposes no
-    cost/token cap flag; MCP meta-tools are not covered by --disallowed-tools.
-    Timeout kills wsl.exe on the host; guest process cleanup is not proven.
+    cwd must be a fresh empty dir /tmp/gbbb-smoke-<random> (never $HOME / a repo).
+    Truthful limits: --max-turns caps turns, not spend; grok 1.0.70 has no cost
+    cap flag; user-level ~/.grok config (native MCP servers, home rules, skills)
+    still loads; timeout kills host wsl.exe, guest cleanup not proven.
     """
-    from ..discovery import is_safe_identity
-
-    probe = build_wsl_probe_plan(task_id=task_id, distro=distro, user=user, cwd=cwd,
+    c = (cwd or "").strip()
+    if not _SMOKE_CWD.match(c):
+        raise PlanError("smoke_cwd_invalid",
+                        "smoke cwd must be a fresh /tmp/gbbb-smoke-<random> dir (not home/repo)")
+    probe = build_wsl_probe_plan(task_id=task_id, distro=distro, user=user, cwd=c,
                                  timeout_sec=min(timeout_sec, 120.0))
     g = (grok_path or "").strip()
     if not g.startswith("/") or Path(g).name != "grok" or not _POSIX_CWD.match(g):
         raise PlanError("grok_path_invalid", "absolute POSIX path ending in /grok required")
+    deny: list[str] = []
+    for r in GROK_SMOKE_DENY_RULES:
+        deny += ["--deny", r]
     argv = (
         "wsl.exe", "-d", probe.wsl_distro, "-u", probe.wsl_user, "--cd", probe.cwd,
-        "--exec", g,
+        "--exec", "/usr/bin/env", *GROK_SMOKE_ENV, g,
         "--single", GROK_SMOKE_PROMPT,
         "--cwd", probe.cwd,
         *GROK_SMOKE_FIXED_FLAGS,
+        *deny,
     )
     _reject_forbidden(argv)
     return ApprovedExecutionPlan(
         task_id=probe.task_id, backend="wsl", cwd=probe.cwd, executable=g, argv=argv,
-        timeout_sec=probe.timeout_sec, max_turns=1, permission_mode="default",
-        allow_rules=(), deny_rules=(), stdin_bytes=None,
+        timeout_sec=probe.timeout_sec, max_turns=1, permission_mode="dontAsk",
+        allow_rules=(), deny_rules=GROK_SMOKE_DENY_RULES, stdin_bytes=None,
         env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": probe.task_id},
         prompt_via_stdin=False, force_prompt_argv=True,
         execution_transport="wsl_exe", execution_kind="grok_smoke_one_shot",
