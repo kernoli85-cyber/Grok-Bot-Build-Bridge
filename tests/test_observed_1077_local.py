@@ -87,14 +87,14 @@ def test_exit_zero_alone_is_not_success(tmp_path, capsys, monkeypatch):
 
 def test_ask_plan_guest_timeout_and_documented_off_switches():
     c = M.resolve_model("LM-Studio", M.ModelSettings(None, {"LM-Studio": M.ModelAlias("LM-Studio", "custom_local", ("qwen3.5-9b-mtp",))}))
-    p = P.build_wsl_grok_ask_plan(task_id="t", distro="Ubuntu", user="okern", grok_path="/home/okern/.local/bin/grok",
+    p = P.build_wsl_grok_ask_plan(task_id="t", distro="Ubuntu", user="gbbbdemo", grok_path="/home/gbbbdemo/.local/bin/grok",
                                   cwd="/tmp/gbbb-ask-MockDir0001", prompt="Antworte nur LOCAL_BRIDGE_OK",
                                   timeout_sec=900, model=c)
     a = p.argv
     i = a.index("--exec")
     assert a[i + 1:i + 6] == ("/usr/bin/timeout", "-k", "10", "900", "/usr/bin/env")
     for e in P.ASK_EXTRA_ENV:
-        assert e in a and a.index(e) < a.index("/home/okern/.local/bin/grok")
+        assert e in a and a.index(e) < a.index("/home/gbbbdemo/.local/bin/grok")
     assert a[a.index("--model") + 1] == "LM-Studio" and p.timeout_sec == 930.0
     assert p.expected_models == EXPECT
     for bad in ("--always-approve", "--yolo", "bypassPermissions"):

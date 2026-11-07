@@ -98,13 +98,14 @@ def make_private_cwd() -> str:
 
 
 def build_local_plan(*, grok_path: str, cwd: str, prompt: str, model, max_turns: int,
-                     timeout_sec: float) -> LocalPlan:
+                     timeout_sec: float, native_structured: tuple[str, str] | None = None) -> LocalPlan:
     if not _ASK_DIR.match(cwd):
         raise RunnerError("cwd_invalid", "cwd must be a fresh /tmp/gbbb-ask-<hex16> dir")
     try:
         wsl = build_wsl_grok_ask_plan(task_id="local", distro="Ubuntu", user="localuser",
                                       grok_path=grok_path, cwd=cwd, prompt=prompt,
-                                      max_turns=max_turns, timeout_sec=timeout_sec, model=model)
+                                      max_turns=max_turns, timeout_sec=timeout_sec, model=model,
+                                      native_structured=native_structured)
     except PlanError as exc:
         raise RunnerError(exc.code, exc.message) from None
     guest = tuple(wsl.argv[wsl.argv.index("--exec") + 1:])
@@ -165,7 +166,8 @@ def _kill_group(pgid: int) -> str:
         return "unproven"
 
 
-def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
+def run_local(plan: LocalPlan, *, show_answer: bool = False, capture_text: bool = False,
+              structured_channel: bool = False) -> dict:
     """Run once. Never retries. Returns a redacted status dict (no prompt/paths/session)."""
     require_posix_nonroot()
     p = subprocess.Popen(list(plan.argv), cwd=plan.cwd, env=_minimal_env(), stdin=subprocess.DEVNULL,
@@ -201,7 +203,9 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
     rc = p.returncode
     truncated = bool(o_cut)
     stdout = b"".join(out)
-    summary = parse_grok_json_result(stdout, truncated=truncated, expected_models=plan.expected_models)
+    summary = parse_grok_json_result(
+        stdout, truncated=truncated, expected_models=plan.expected_models,
+        allow_structured_without_text=structured_channel)
     if timed_out or rc in (124, 137):
         status, code = "needs_review", "timeout"
     elif truncated:
@@ -227,6 +231,17 @@ def run_local(plan: LocalPlan, *, show_answer: bool = False) -> dict:
         text, cut = extract_answer_text(stdout, truncated=truncated)
         res["answer"] = text
         res["answer_cut"] = cut
+    if capture_text and summary.parse_status == "ok":
+        from .grok_result import result_text_meta, structured_output_status
+        meta = result_text_meta(stdout)
+        res["captured_meta"] = {k: meta[k] for k in
+                                ("key", "alternate_present", "alternate_bytes", "fields_equal")}
+        if meta["text"] is not None:
+            res["captured_text"] = meta["text"]
+        structured = structured_output_status(stdout)
+        res["structured_state"] = structured["state"]
+        if structured["state"] == "value":
+            res["structured_value"] = structured["value"]
     return res
 
 

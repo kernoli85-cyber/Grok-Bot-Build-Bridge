@@ -30,7 +30,7 @@ from grok_bot_build_bridge.preferences import (
 def _plan(desired="unset", kind="wsl"):
     if kind == "wsl":
         cand = nonroot_ready(
-            "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+            "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
         )
         report = classify_discovery(
             native_path=None, native_version_text=None, wsl_candidates=(cand,)
@@ -43,7 +43,7 @@ def _plan(desired="unset", kind="wsl"):
         )
     elif kind == "both":
         cand = nonroot_ready(
-            "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+            "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
         )
         report = classify_discovery(
             native_path=r"C:\grok\grok.exe",

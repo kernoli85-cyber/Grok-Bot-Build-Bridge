@@ -53,8 +53,8 @@ def test_pipeline_real_pipe_pack_confirm_plan(tmp_path):
     with pytest.raises(C.ContextError):
         C.confirm_send(pk, "0" * 64)
     prompt = C.confirm_send(pk, pk.fingerprint)
-    plan = P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="okern",
-                                     grok_path="/home/okern/.local/bin/grok", cwd="/tmp/gbbb-ask-Abcdefgh1234",
+    plan = P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="gbbbdemo",
+                                     grok_path="/home/gbbbdemo/.local/bin/grok", cwd="/tmp/gbbb-ask-Abcdefgh1234",
                                      prompt=prompt, timeout_sec=900, model=_lm())
     a = plan.argv
     assert a[a.index("--single") + 1] == prompt

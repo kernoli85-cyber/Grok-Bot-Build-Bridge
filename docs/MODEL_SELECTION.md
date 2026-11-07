@@ -63,31 +63,28 @@ None of this has been checked against the installed 1.0.70 `--help`.
 ### What was observed (one approved run, 2026-11-07 ~12:50 CET)
 - WSL Grok is **1.0.77** (`grok --version`). Earlier notes say 1.0.70; that was the version at
   the time, and they are kept as history. `grok --help` on 1.0.77 lists `-m, --model <MODEL>`.
-- The owner's catalog key is `LM-Studio` (owner-supplied, exact case). One headless run used
-  `--model LM-Studio --output-format json --max-turns 1`, strict sandbox, `dontAsk`, every tool
-  denied, the env switches below, and `/usr/bin/timeout 900` inside WSL. It finished after ~20 s.
+- A catalog key such as `LM-Studio` is passed through as `--model`. The headless flags used with it are
+  `--output-format json --max-turns 1`, strict sandbox, `dontAsk`, every tool denied, the env switches below,
+  and `/usr/bin/timeout` inside WSL.
 - Result: `text` `LOCAL_BRIDGE_OK`, `stopReason` `end_turn`, `num_turns` 1, **no `is_error` field**,
   **no cost fields** (cost unknown, not zero). Tokens: input 9299, output 29, reasoning 21,
   total 9328. Here `total = input + output`, so reasoning is counted inside output; the bridge
   stores what Grok reports and never re-adds reasoning.
-- `modelUsage` is keyed by the **provider model id** `qwen3.5-9b-mtp`, **not** the catalog key `LM-Studio`.
-- The owner saw the request in the LM Studio server debug window. That backs up that the main
-  request was processed locally. It does **not** prove that no side-model call happened
-  (session title etc.), and it proves nothing about tool isolation (the tool canary is untested).
-- No bridge was installed on the host for this run. The Windows companion there is still 0.16.2,
-  and no host setting was changed.
+- `modelUsage` is keyed by the provider model id, not by the catalog key.
+- A local server log of the request does not prove that no side-model call happened
+  (session title and similar), and it proves nothing about tool isolation.
 - `tests/fixtures/grok_json_1077_local_observed_redacted.json` keeps the observed field names,
   nesting and numbers. Session and request ids, cwd and thought text are replaced placeholders.
   It is a derived fixture, not a raw capture.
 
 ### Explicit identity onboarding (no auto-trust)
-The bridge never hardcodes `LM-Studio -> qwen...`. Each user declares their own key:
+The bridge never hardcodes a catalog key to a provider model id. Each user declares their own key:
 
 ```
-grok-bot-build-bridge model-settings add-alias LM-Studio --expect-usage-key qwen3.5-9b-mtp
+grok-bot-build-bridge model-settings add-alias LM-Studio --expect-usage-key provider-model-id
 # or learn it from a saved result file explicitly:
 grok-bot-build-bridge model-settings check-result LM-Studio --result-file result.json          # dry run, exit 3 if not confirmed
-grok-bot-build-bridge model-settings check-result LM-Studio --result-file result.json --set-usage-key qwen3.5-9b-mtp
+grok-bot-build-bridge model-settings check-result LM-Studio --result-file result.json --set-usage-key provider-model-id
 ```
 
 - `check-result` reads only the `modelUsage` keys, bounded to 64 KiB with strict JSON and no
@@ -130,10 +127,10 @@ installation of the bridge inside WSL, and distribution of an installable app.
 2. **Extended denylist check:** the same prompt as before (`LOCAL_BRIDGE_OK`) with those names
    added to `--disallowed-tools` gave `available_commands.tools: []` and `end_turn`, and input
    tokens dropped from 9341 to 3581. `GROK_DENY_BUILTIN_TOOLS` now includes them (smoke and ask).
-- `modelUsage` was `qwen3.5-9b-mtp` both times. Cost was not reported, so unknown.
+- `modelUsage` was `provider-model-id` both times. Cost was not reported, so unknown.
 - No ACP run (see docs/ACP.md). That makes 2 of the 3 allowed prompts.
 - Cleanup removed only our own canary file and the empty test dirs. The historical
-  `/tmp/gbbb-smoke-DWIqNz` was left alone. Grok keeps its own session records under `~/.grok`;
+  `/tmp/gbbb-smoke-<random>` was left alone. Grok keeps its own session records under `~/.grok`;
   we did not read or delete them.
 - Slash *commands* (e.g. `always-approve`) are still listed. They are TUI commands, not model
   tools; whether a model can trigger them is untested.

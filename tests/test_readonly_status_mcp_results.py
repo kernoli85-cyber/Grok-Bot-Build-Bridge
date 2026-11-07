@@ -34,7 +34,7 @@ def _make_db(d: Path, n_plain: int = 2) -> Path:
     execute_one_shot(st, p, owner="w", dry_run=False,
                      executor=lambda a, **k: RunResult(tuple(a), 0, OUT, ""))
     for i in range(n_plain):
-        st.enqueue_job(task_id=f"plain-{i}", backend="wsl", cwd="/home/okern/private-proj")
+        st.enqueue_job(task_id=f"plain-{i}", backend="wsl", cwd="/home/gbbbdemo/private-proj")
     del st, p
     import gc
     gc.collect()  # close lingering writer connections -> WAL checkpointed, sidecars gone
@@ -205,7 +205,7 @@ def test_mcp_stdio_result_tool_disabled_by_default(tmp_path):
         js = _payload(await s.call_tool("bridge_job_status", {"task_id": "plain-0"}))
         blob = json.dumps(js)
         assert js["job"]["status"] == "queued"
-        assert "/home/okern" not in blob and str(tmp_path) not in blob and "lease_owner" not in blob
+        assert "/home/gbbbdemo" not in blob and str(tmp_path) not in blob and "lease_owner" not in blob
         st = _payload(await s.call_tool("bridge_status", {}))
         assert st["total_jobs"] == 3 and str(tmp_path) not in json.dumps(st)
     _stdio(tmp_path / "s", {}, fn)

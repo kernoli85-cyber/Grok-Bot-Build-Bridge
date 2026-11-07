@@ -78,7 +78,7 @@ def test_resolution_order_and_no_silent_fallback():
 
 
 def _plan(model, t=180.0):
-    return P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="okern", grok_path="/usr/bin/grok",
+    return P.build_wsl_grok_ask_plan(task_id="t1", distro="Ubuntu", user="gbbbdemo", grok_path="/usr/bin/grok",
                                      cwd=CWD, prompt="hi", timeout_sec=t, model=model)
 
 

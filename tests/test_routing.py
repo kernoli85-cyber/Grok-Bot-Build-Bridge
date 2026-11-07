@@ -7,7 +7,7 @@ from grok_bot_build_bridge.routing import plan_job, select_backend, validate_cwd
 
 def _wsl_report():
     cand = nonroot_ready(
-        "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
     return classify_discovery(
         native_path=None, native_version_text=None, wsl_candidates=(cand,)
@@ -16,7 +16,7 @@ def _wsl_report():
 
 def _both_report():
     cand = nonroot_ready(
-        "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
     return classify_discovery(
         native_path=r"C:\grok\grok.exe",
@@ -45,13 +45,13 @@ def test_both_without_default_errors():
 
 
 def test_cwd_reject_windows_path_on_wsl():
-    err = validate_cwd("wsl", r"C:\Users\okern\project")
+    err = validate_cwd("wsl", r"C:\Users\gbbbdemo\project")
     assert err is not None
     assert err.code == "cwd_backend_mismatch"
 
 
 def test_cwd_reject_mnt_on_native():
-    err = validate_cwd("native", "/mnt/c/Users/okern/project")
+    err = validate_cwd("native", "/mnt/c/Users/gbbbdemo/project")
     assert err is not None
     assert err.code == "cwd_backend_mismatch"
 
@@ -63,7 +63,7 @@ def test_plan_job_wsl_ok():
         JobRequest(
             task_id="t1",
             prompt="explain API",
-            cwd="/home/okern/proj",
+            cwd="/home/gbbbdemo/proj",
             max_turns=3,
             deny_rules=("Bash(rm *)",),
         ),

@@ -1,0 +1,13 @@
+{
+  "schema": "gbbb.invoke/v1",
+  "op": "ask",
+  "executable": "/home/gbbbdemo/.local/bin/grok",
+  "model": {
+    "id": "LM-Studio",
+    "kind": "custom_local",
+    "expect_usage_keys": ["provider-model-id"]
+  },
+  "prompt": "Reply with the single word READY.",
+  "max_turns": 1,
+  "timeout_sec": 180
+}

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.privacy_scan import scan_tar, scan_zip
+
 ROOT = Path(__file__).resolve().parents[1]
 
 # Subcommands that must work from an installed wheel (no checkout cwd)
@@ -23,11 +25,12 @@ _SMOKE_CMDS = [
 ]
 
 
-def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None) -> subprocess.CompletedProcess:
+def _run(cmd: list[str], *, cwd: Path | None = None, env: dict | None = None, input: str | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(
         cmd,
         cwd=cwd,
         env=env,
+        input=input,
         text=True,
         capture_output=True,
         check=False,
@@ -54,6 +57,12 @@ def built_artifacts(tmp_path_factory) -> tuple[Path, Path]:
     assert wheels, "wheel missing"
     assert sdists, "sdist missing"
     return wheels[0], sdists[0]
+
+
+def test_built_packages_privacy_categories(built_artifacts):
+    wheel, sdist = built_artifacts
+    hits = scan_zip(wheel) + scan_tar(sdist)
+    assert hits == [], "package privacy categories: " + ", ".join(hits)
 
 
 def test_wheel_name_is_py3_none_any(built_artifacts):
@@ -244,7 +253,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
                "LOCALAPPDATA": str(xdg / "l")}
     ask_db = tmp_path / "ask" / "never.db"
     r = _run([str(exe), "ask", "--prompt", 'Sag "Hallo" \u00fc SECRETP', "--wsl-distro", "Ubuntu",
-              "--wsl-user", "okern", "--executable", "/usr/bin/grok", "--state-db", str(ask_db)], cwd=work, env=ask_env)
+              "--wsl-user", "gbbbdemo", "--executable", "/usr/bin/grok", "--state-db", str(ask_db)], cwd=work, env=ask_env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert json.loads(r.stdout)["state_written"] is False and "SECRETP" not in r.stdout
     assert not ask_db.exists() and not xdg.exists()
@@ -263,7 +272,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     r = cli("model-settings", "--settings", str(ms), "add-alias", "LM-Studio", "--expect-usage-key", "fake-local-model")
     assert r.returncode == 0, r.stdout + r.stderr
     assert cli("model-settings", "--settings", str(ms), "set-preferred", "LM-Studio").returncode == 0
-    r = cli("ask", "--wsl-distro", "Ubuntu", "--wsl-user", "okern", "--executable", "/usr/bin/grok",
+    r = cli("ask", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo", "--executable", "/usr/bin/grok",
             "--prompt", "hi", "--model-settings", str(ms))
     d = json.loads(r.stdout)
     assert r.returncode == 0 and d["dry_run"] is True and d["limits"]["model"]["source"] == "owner_preference"
@@ -290,7 +299,7 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     if os.name == "posix" and not (hasattr(os, "geteuid") and os.geteuid() == 0):
         assert r.returncode == 0 and d["model_call"] is False and "47113" not in r.stdout, r.stdout
         assert json.loads(cli(*cargs).stdout)["consent_token"] == d["consent_token"]
-        r = cli(*cargs, "--wsl-user", "okern")
+        r = cli(*cargs, "--wsl-user", "gbbbdemo")
         assert json.loads(r.stdout)["error"]["code"] == "backend_args_conflict"
         r = cli(*cargs, "--execute", "--allow-model-call", "--confirm-send", d["consent_token"])
         assert json.loads(r.stdout)["error"]["code"] == "executable_missing"
@@ -311,6 +320,174 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
         assert res["cwd_cleanup"] == "removed" and res["cost_status"] == "unknown"
     elif os.name != "posix":
         assert r.returncode == 2 and d["error"]["code"] == "posix_source_only"
+    inv_env = {k: v for k, v in env.items() if k not in {"LOCALAPPDATA", "XDG_CONFIG_HOME", "HOME"}}
+    inv_env["LOCALAPPDATA"] = str(tmp_path / "inv-local")
+    inv_env["XDG_CONFIG_HOME"] = str(tmp_path / "inv-config")
+    inv_env["HOME"] = str(tmp_path / "inv-home")
+    inv_grok = tmp_path / "inv-grok" / "grok"
+    if os.name == "posix":
+        inv_grok.parent.mkdir(mode=0o755)
+        inv_grok.write_text(
+            "#!" + sys.executable + "\nimport json, os, sys\n"
+            "assert '--sandbox' in sys.argv and 'MCPTool' in sys.argv and os.listdir('.') == []\n"
+            "print(json.dumps({'text': 'ok', 'stopReason': 'end_turn', 'num_turns': 1, "
+            "'usage': {'input_tokens': 1, 'output_tokens': 1}, "
+            "'modelUsage': {'provider-model-id': {}}}))\n")
+        inv_grok.chmod(0o755)
+        invoke_executable = str(inv_grok)
+    else:
+        invoke_executable = "/usr/bin/grok"
+    ask_envlp = {
+        "schema": "gbbb.invoke/v1", "op": "ask", "executable": invoke_executable,
+        "model": {"id": "LM-Studio", "kind": "custom_local", "expect_usage_keys": ["provider-model-id"]},
+        "prompt": "PROMPTTOKEN ready",
+    }
+    r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(ask_envlp))
+    if os.name != "posix" or (hasattr(os, "geteuid") and os.geteuid() == 0):
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        assert not (tmp_path / "inv-config").exists()
+        prop = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": "/usr/bin/grok",
+                "model": ask_envlp["model"], "source": "/tmp/gbbb-src", "files": ["a.txt"],
+                "instruction": "No-op."}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        native = dict(prop, replacement_format="native-schema-v1")
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(native))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+        apply_env = {"schema": "gbbb.invoke/v1", "op": "apply", "source": "/tmp/gbbb-src",
+                     "file": "a.txt", "replacement": {"schema": "gbbb.file_replacements/v1",
+                     "files": [{"path": "a.txt", "content": "beta\n"}]}}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        assert r.returncode == 2 and json.loads(r.stdout)["error"]["code"] == "posix_only"
+    else:
+        d = json.loads(r.stdout)
+        assert r.returncode == 0 and d["mode"] == "dry_run" and d["model_call"] is False
+        assert "PROMPTTOKEN" not in r.stdout, r.stdout
+        sent = dict(ask_envlp, execute=True, allow_model_call=True, confirm_send=d["consent_token"])
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(sent))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["stored"] is False, r.stdout
+        assert body["result"]["status"] == "succeeded" and body["result"]["model_identity"] == "confirmed"
+        assert "PROMPTTOKEN" not in r.stdout and "sessionId" not in r.stdout
+        psrc = tmp_path / "psrc"
+        (psrc / "notes").mkdir(parents=True)
+        os.chmod(psrc, 0o755)
+        os.chmod(psrc / "notes", 0o755)
+        pfile = psrc / "notes" / "a.txt"
+        pfile.write_text("alpha\n")
+        before = pfile.read_bytes()
+        prop_dummy = tmp_path / "prop-bin" / "grok"
+        prop_dummy.parent.mkdir(mode=0o755)
+        replacement = json.dumps({"schema": "gbbb.file_replacements/v1",
+                                  "files": [{"path": "notes/a.txt", "content": "beta\n"}]})
+        grok_out = {"text": replacement, "stopReason": "end_turn", "num_turns": 1,
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "modelUsage": {"provider-model-id": {}}}
+        prop_dummy.write_text("#!" + sys.executable + "\nimport json, os, sys\n"
+                              "assert '--sandbox' in sys.argv and os.listdir('.') == []\n"
+                              "print(json.dumps(" + json.dumps(grok_out) + "))\n")
+        prop_dummy.chmod(0o755)
+        prop = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(prop_dummy),
+                "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/a.txt"],
+                "instruction": "Use beta."}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        tok = json.loads(r.stdout)["consent_token"]
+        prop.update(execute=True, allow_model_call=True, confirm_send=tok, show_proposal=True)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(prop))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["status"] == "proposal_accepted"
+        assert body["proposal"]["applied"] is False and body["source_writes"] is False
+        assert body["proposal"]["changed"] is True and pfile.read_bytes() == before
+        lit = psrc / "notes" / "q.txt"
+        lit.write_text('QUOTES = \'""""\'\nNOTE = r"line\\nbreak"\n')
+        lit_before = lit.read_bytes()
+        lit_dummy = tmp_path / "lit-bin" / "grok"
+        lit_dummy.parent.mkdir(mode=0o755)
+        script = "\n".join([
+            "#!" + sys.executable,
+            "import json, os, re, sys",
+            "prompt = sys.argv[sys.argv.index('--single') + 1]",
+            "nonce = re.search(r'The framing nonce is ([0-9a-f]{16})', prompt).group(1)",
+            "content = " + repr(lit.read_text()),
+            "body = (",
+            "    'GBBB-REPLACEMENTS 1 ' + nonce + '\\n'",
+            "    + 'FILE ' + nonce + ' path=notes/q.txt\\n' + content",
+            "    + '\\nEND ' + nonce + ' path=notes/q.txt\\n'",
+            "    + 'END-REPLACEMENTS ' + nonce + '\\n'",
+            ")",
+            "assert '--sandbox' in sys.argv and os.listdir('.') == []",
+            "print(json.dumps({'text': body, 'stopReason': 'end_turn', 'num_turns': 1,",
+            " 'usage': {'input_tokens': 1, 'output_tokens': 1},",
+            " 'modelUsage': {'provider-model-id': {}}}))",
+            "",
+        ])
+        lit_dummy.write_text(script)
+        lit_dummy.chmod(0o755)
+        lit_env = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(lit_dummy),
+                   "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/q.txt"],
+                   "instruction": "Keep the text.", "replacement_format": "literal-v1"}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(lit_env))
+        tok = json.loads(r.stdout)["consent_token"]
+        lit_env.update(execute=True, allow_model_call=True, confirm_send=tok, show_proposal=True)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(lit_env))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
+        assert body["proposal"]["format"] == "literal-v1" and lit.read_bytes() == lit_before
+        nat = psrc / "notes" / "n.txt"
+        nat.write_text('QUOTES = \'""""\'\n')
+        nat_before = nat.read_bytes()
+        nat_dummy = tmp_path / "nat-bin" / "grok"
+        nat_dummy.parent.mkdir(mode=0o755)
+        nat_script = "\n".join([
+            "#!" + sys.executable,
+            "import json, os, sys",
+            "assert sys.argv.count('--single') == 1",
+            "assert '--verbatim' in sys.argv and '--json-schema' in sys.argv",
+            "assert '--system-prompt-override' in sys.argv",
+            "assert '--rules' not in sys.argv and '--prompt-file' not in sys.argv",
+            "assert '--sandbox' in sys.argv and sys.argv[sys.argv.index('--max-turns') + 1] == '1'",
+            "assert os.listdir('.') == []",
+            "schema = json.loads(sys.argv[sys.argv.index('--json-schema') + 1])",
+            "assert schema['additionalProperties'] is False",
+            "assert schema['properties']['files']['items']['properties']['path']['enum'] == ['notes/n.txt']",
+            "value = {'schema': 'gbbb.file_replacements/v1', 'files': [{'path': 'notes/n.txt', 'content': " + repr(nat.read_text()) + "}]}",
+            "print(json.dumps({'text': 'I edited the file and ran tests.', 'structuredOutput': value,",
+            " 'stopReason': 'end_turn', 'num_turns': 1,",
+            " 'usage': {'input_tokens': 1, 'output_tokens': 1},",
+            " 'modelUsage': {'provider-model-id': {}}}))",
+            "",
+        ])
+        nat_dummy.write_text(nat_script)
+        nat_dummy.chmod(0o755)
+        nat_env = {"schema": "gbbb.invoke/v1", "op": "propose", "executable": str(nat_dummy),
+                   "model": ask_envlp["model"], "source": str(psrc), "files": ["notes/n.txt"],
+                   "instruction": "Keep the text.", "replacement_format": "native-schema-v1"}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(nat_env))
+        tok = json.loads(r.stdout)["consent_token"]
+        nat_env.update(execute=True, allow_model_call=True, confirm_send=tok)
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(nat_env))
+        body = json.loads(r.stdout)
+        assert r.returncode == 0 and body["status"] == "proposal_accepted", r.stdout
+        assert body["proposal"]["format"] == "native-schema-v1" and body["proposal"]["changed"] is False
+        assert nat.read_bytes() == nat_before and "I edited the file" not in r.stdout
+        target = psrc / "notes" / "one.txt"
+        target.write_text("alpha\n")
+        os.chmod(target, 0o644)
+        before_mode = os.stat(target).st_mode
+        apply_env = {"schema": "gbbb.invoke/v1", "op": "apply", "source": str(psrc),
+                     "file": "notes/one.txt",
+                     "replacement": {"schema": "gbbb.file_replacements/v1",
+                                     "files": [{"path": "notes/one.txt", "content": "beta\n"}]}}
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        preview = json.loads(r.stdout)
+        assert r.returncode == 0 and preview["source_writes"] is False and preview["applied"] is False
+        assert target.read_text() == "alpha\n" and "beta" not in r.stdout
+        apply_env.update(base_sha256=preview["base_sha256"], confirm_apply=preview["apply_token"])
+        r = _run([str(exe), "invoke"], cwd=work, env=inv_env, input=json.dumps(apply_env))
+        done_apply = json.loads(r.stdout)
+        assert r.returncode == 0 and done_apply["source_writes"] is True and done_apply["applied"] is True
+        assert target.read_text() == "beta\n" and os.stat(target).st_mode == before_mode
+        assert not list(psrc.rglob(".gbbb-apply-*.tmp"))
     # doctor from the installed wheel: fixture default, read-only state check, no creation.
     r = cli("doctor", "--format", "text", "--state-db", str(db))
     assert r.returncode == 0 and "FIXTURE" in r.stdout and "[ok] state_db" in r.stdout

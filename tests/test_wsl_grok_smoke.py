@@ -5,13 +5,13 @@ from grok_bot_build_bridge.runner.plan import PlanError, build_wsl_grok_smoke_pl
 from grok_bot_build_bridge.safe_exec import RunResult
 
 CWD = "/tmp/gbbb-smoke-AbC123xyz"
-KW = dict(task_id="s1", distro="Ubuntu", user="okern", grok_path="/home/okern/.local/bin/grok", cwd=CWD)
+KW = dict(task_id="s1", distro="Ubuntu", user="gbbbdemo", grok_path="/home/gbbbdemo/.local/bin/grok", cwd=CWD)
 RUNNING = "  NAME STATE VERSION\n* Ubuntu    Running         2\n"
 
 
 def test_smoke_plan_fixed_flags():
     a = build_wsl_grok_smoke_plan(**KW).argv
-    assert a[:9] == ("wsl.exe", "-d", "Ubuntu", "-u", "okern", "--cd", CWD, "--exec", "/usr/bin/env")
+    assert a[:9] == ("wsl.exe", "-d", "Ubuntu", "-u", "gbbbdemo", "--cd", CWD, "--exec", "/usr/bin/env")
     assert "GROK_MEMORY=0" in a
     assert a[a.index("--max-turns") + 1] == "1"
     assert a[a.index("--sandbox") + 1] == "strict"
@@ -23,7 +23,7 @@ def test_smoke_plan_fixed_flags():
         assert bad not in j.split() and bad not in j.replace("--sandbox strict", "")
 
 
-@pytest.mark.parametrize("bad", [{"cwd": "/home/okern"}, {"cwd": "/tmp"}, {"cwd": "/tmp/gbbb-smoke-a/../x"},
+@pytest.mark.parametrize("bad", [{"cwd": "/home/gbbbdemo"}, {"cwd": "/tmp"}, {"cwd": "/tmp/gbbb-smoke-a/../x"},
                                  {"user": "root"}, {"grok_path": "/bin/sh"}])
 def test_smoke_plan_rejects(bad):
     with pytest.raises(PlanError):
@@ -32,8 +32,8 @@ def test_smoke_plan_rejects(bad):
 
 def _base(tmp_path):
     return ["runner-run", "--state-db", str(tmp_path / "s.db"), "--task-id", "s1", "--cwd", CWD,
-            "--wsl-grok-smoke", "--wsl-distro", "Ubuntu", "--wsl-user", "okern",
-            "--executable", "/home/okern/.local/bin/grok"]
+            "--wsl-grok-smoke", "--wsl-distro", "Ubuntu", "--wsl-user", "gbbbdemo",
+            "--executable", "/home/gbbbdemo/.local/bin/grok"]
 
 
 def test_cli_dry_run_and_gate_default_off(tmp_path, capsys, monkeypatch):

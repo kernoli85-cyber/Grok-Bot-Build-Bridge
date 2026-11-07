@@ -107,6 +107,7 @@ def parse_grok_json_result(
     truncated: bool = False,
     expected_text: str | None = None,
     expected_models: tuple[str, ...] | None = None,
+    allow_structured_without_text: bool = False,
 ) -> GrokResultSummary:
     if truncated:
         return _fail("truncated")
@@ -146,7 +147,14 @@ def parse_grok_json_result(
         return _fail("not_object")
     text, ti = _first(obj, _TEXT_KEYS)
     if not isinstance(text, str):
-        return _fail("no_text")
+        # Native proposal mode only. An empty stand-in is not a proposal and is
+        # never read as one. Ask results still require text or result.
+        if allow_structured_without_text and (
+            "structuredOutput" in obj or "structuredOutputError" in obj
+        ):
+            text, ti = "", 0
+        else:
+            return _fail("no_text")
 
     stop, si = _first(obj, _STOP_KEYS)
     stop = stop if isinstance(stop, str) and _STOP_RE.match(stop) else None
@@ -267,6 +275,90 @@ def validate_summary(d: Any) -> bool:
 
 ANSWER_MAX_CHARS = 16_000
 _ANSWER_CTRL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def result_text_meta(stdout: str | bytes | None) -> dict[str, Any]:
+    """Which supported answer field was read. Does not echo the text.
+
+    ``text`` is preferred, then ``result``, matching parse_grok_json_result.
+    """
+    none = {"text": None, "key": "none", "alternate_present": False,
+            "alternate_bytes": None, "fields_equal": False}
+    if not stdout:
+        return none
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return none
+    try:
+        obj = json.loads(stdout.strip())
+    except (ValueError, RecursionError):
+        return none
+    if not isinstance(obj, dict):
+        return none
+    value, idx = _first(obj, _TEXT_KEYS)
+    if idx is None or not isinstance(value, str):
+        return none
+    other_key = _TEXT_KEYS[1 - idx]
+    other = obj.get(other_key)
+    alt = isinstance(other, str)
+    return {
+        "text": value,
+        "key": _TEXT_KEYS[idx],
+        "alternate_present": alt,
+        "alternate_bytes": len(other.encode()) if alt else None,
+        "fields_equal": bool(alt and other == value),
+    }
+
+
+def structured_output_status(stdout: str | bytes | None) -> dict[str, Any]:
+    """Headless ``--output-format json`` structured field only.
+
+    Current grok-build headless tests expose the value as ``structuredOutput``
+    and a failure as ``structuredOutputError``. This does not read ``text`` or
+    the snake_case streaming-messages field. Both keys together are ambiguous.
+    The error string is not returned.
+    """
+    absent = {"state": "absent", "value": None}
+    if not stdout:
+        return absent
+    if isinstance(stdout, bytes):
+        try:
+            stdout = stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return absent
+    try:
+        obj = json.loads(stdout.strip())
+    except (ValueError, RecursionError):
+        return absent
+    if not isinstance(obj, dict):
+        return absent
+    has_value = "structuredOutput" in obj
+    has_error = "structuredOutputError" in obj
+    if has_value and has_error:
+        return {"state": "ambiguous", "value": None}
+    if has_error:
+        return {"state": "error", "value": None}
+    if not has_value:
+        return absent
+    value = obj.get("structuredOutput")
+    if not isinstance(value, dict):
+        return {"state": "invalid", "value": None}
+    return {"state": "value", "value": value}
+
+
+def result_text(stdout: str | bytes | None) -> str | None:
+    """Answer string from the same field the result parser uses. Not for display or storage."""
+    return result_text_meta(stdout)["text"]
+
+
+def sanitize_display_text(text: str) -> tuple[str, bool]:
+    """Same control-character and length rules as opt-in answer display. Not stored."""
+    clean = _ANSWER_CTRL.sub("\ufffd", (text or "").replace("\r\n", "\n"))
+    if len(clean) > ANSWER_MAX_CHARS:
+        return clean[:ANSWER_MAX_CHARS], True
+    return clean, False
 
 
 def extract_answer_text(stdout: str | bytes | None, *, truncated: bool = False) -> tuple[str | None, bool]:

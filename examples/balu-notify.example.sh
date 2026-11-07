@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Beispiel-command-Hook für Grok Build unter okern.
+# Example command hook for Grok Build. Synthetic only; not a real account.
 # Erwartet BALU_WEBHOOK_URL und BALU_WEBHOOK_KEY in der Umgebung.
 # Liest Hook-JSON von stdin und POSTet es an die Bot-Webhook-Routine.
 set -euo pipefail

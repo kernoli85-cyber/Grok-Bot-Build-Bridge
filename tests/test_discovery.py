@@ -38,7 +38,7 @@ def test_root_user_never_ready():
 
 def test_stopped_distro_asks():
     c = nonroot_ready(
-        "Ubuntu", "okern", 1000, "Stopped", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Stopped", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
     assert c.state == BackendState.STOPPED
 
@@ -46,10 +46,10 @@ def test_stopped_distro_asks():
 def test_wsl_only_matrix():
     cand = nonroot_ready(
         "Ubuntu",
-        "okern",
+        "gbbbdemo",
         1000,
         "Running",
-        "/home/okern/.local/bin/grok",
+        "/home/gbbbdemo/.local/bin/grok",
         (FIX / "grok_version_ok.txt").read_text(encoding="utf-8"),
     )
     report = classify_discovery(
@@ -74,7 +74,7 @@ def test_native_only_matrix():
 
 def test_both_requires_explicit_default():
     cand = nonroot_ready(
-        "Ubuntu", "okern", 1000, "Running", "/home/okern/.local/bin/grok", "grok 1.0.70"
+        "Ubuntu", "gbbbdemo", 1000, "Running", "/home/gbbbdemo/.local/bin/grok", "grok 1.0.70"
     )
     report = classify_discovery(
         native_path=r"C:\grok\grok.exe",

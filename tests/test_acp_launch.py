@@ -7,7 +7,7 @@ from grok_bot_build_bridge import acp_launch as L
 
 HELP = (Path(__file__).parent / "fixtures" / "grok_1077_agent_help.txt").read_text()
 CWD = "/tmp/gbbb-ask-MockDir0001"
-KW = dict(distro="Ubuntu", user="okern", grok_path="/home/okern/.local/bin/grok", cwd=CWD,
+KW = dict(distro="Ubuntu", user="gbbbdemo", grok_path="/home/gbbbdemo/.local/bin/grok", cwd=CWD,
           model="LM-Studio", profile_path=CWD + "/gbbb-profile.md")
 
 
