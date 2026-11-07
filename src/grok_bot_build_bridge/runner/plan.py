@@ -358,3 +358,63 @@ def require_wsl_distro_running(distro: str, wsl_list_text: str) -> None:
                 f"distro {distro!r} is {row['state']}; operator must start it (never auto-start)",
             )
     raise PlanError("wsl_distro_not_listed", f"distro {distro!r} not in wsl -l -v output")
+
+
+# --- Real Grok one-shot smoke plan via wsl.exe (planning only in this slice) ---
+# Flags verified against `grok --help` of grok 1.0.70 on the operator host (2026-11-07).
+GROK_SMOKE_PROMPT = "Antworte nur BRIDGE_OK"
+GROK_DENY_BUILTIN_TOOLS = (
+    "run_terminal_cmd,read_file,grep,list_dir,search_replace,web_search,"
+    "web_fetch,todo_write,task,Agent"
+)
+GROK_SMOKE_FIXED_FLAGS = (
+    "--max-turns", "1",                      # turn cap - NOT a cost/token cap
+    "--output-format", "json",               # json carries usage/cost if reported
+    "--disallowed-tools", GROK_DENY_BUILTIN_TOOLS,
+    "--disable-web-search",
+    "--no-subagents",
+    "--no-plan",
+    "--sandbox", "read-only",
+    "--permission-mode", "default",          # never bypassPermissions / --always-approve
+)
+
+
+def build_wsl_grok_smoke_plan(
+    *,
+    task_id: str,
+    distro: str,
+    user: str,
+    grok_path: str,
+    cwd: str,
+    timeout_sec: float = 90.0,
+) -> ApprovedExecutionPlan:
+    """Fixed headless one-shot Grok smoke via wsl.exe. Prompt and flags are not operator-editable.
+
+    Limits (truthful): --max-turns caps turns, not spend; grok 1.0.70 exposes no
+    cost/token cap flag; MCP meta-tools are not covered by --disallowed-tools.
+    Timeout kills wsl.exe on the host; guest process cleanup is not proven.
+    """
+    from ..discovery import is_safe_identity
+
+    probe = build_wsl_probe_plan(task_id=task_id, distro=distro, user=user, cwd=cwd,
+                                 timeout_sec=min(timeout_sec, 120.0))
+    g = (grok_path or "").strip()
+    if not g.startswith("/") or Path(g).name != "grok" or not _POSIX_CWD.match(g):
+        raise PlanError("grok_path_invalid", "absolute POSIX path ending in /grok required")
+    argv = (
+        "wsl.exe", "-d", probe.wsl_distro, "-u", probe.wsl_user, "--cd", probe.cwd,
+        "--exec", g,
+        "--single", GROK_SMOKE_PROMPT,
+        "--cwd", probe.cwd,
+        *GROK_SMOKE_FIXED_FLAGS,
+    )
+    _reject_forbidden(argv)
+    return ApprovedExecutionPlan(
+        task_id=probe.task_id, backend="wsl", cwd=probe.cwd, executable=g, argv=argv,
+        timeout_sec=probe.timeout_sec, max_turns=1, permission_mode="default",
+        allow_rules=(), deny_rules=(), stdin_bytes=None,
+        env={"GROK_BOT_BUILD_BRIDGE_TASK_ID": probe.task_id},
+        prompt_via_stdin=False, force_prompt_argv=True,
+        execution_transport="wsl_exe", execution_kind="grok_smoke_one_shot",
+        wsl_distro=probe.wsl_distro, wsl_user=probe.wsl_user,
+    )

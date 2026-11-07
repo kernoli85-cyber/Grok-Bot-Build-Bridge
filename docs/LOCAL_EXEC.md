@@ -105,3 +105,14 @@ Dry-run by default. With `--execute` it first reads `wsl.exe -l -v` and refuses 
 distro is `Running` (never starts it); root refused. Runs `/usr/bin/printf` only;
 `grok_executed=false`. Outbox events are then inspectable with `outbox-pump` (dry-run default).
 Real Grok jobs through `wsl_exe` are a separate future gate.
+
+## Grok one-shot smoke (v0.16.1, plan only)
+
+Verified on host `grok 1.0.70` help: `--single`, `--max-turns`, `--output-format json`,
+`--disallowed-tools`, `--disable-web-search`, `--no-subagents`, `--no-plan`, `--sandbox`,
+`--permission-mode`. **No cost/token cap flag exists**; `--max-turns 1` caps turns only.
+Docs (newer) say MCP meta-tools are not removed by `--disallowed-tools`; `--no-memory` is in
+newer docs but absent from 1.0.70 help (not used).
+
+`runner-run --wsl-grok-smoke ...` prints the fixed plan; `--execute` returns `model_call_gated`.
+Running the model needs explicit owner approval of one call with unknown cost.

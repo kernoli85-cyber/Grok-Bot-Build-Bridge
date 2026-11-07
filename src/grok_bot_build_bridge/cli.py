@@ -358,6 +358,8 @@ def cmd_runner_run(args: argparse.Namespace) -> int:
     store = _store_from_args(args)
     if args.wsl_probe:
         return _cmd_runner_wsl_probe(args, store)
+    if args.wsl_grok_smoke:
+        return _cmd_runner_wsl_grok_smoke(args, store)
     if not args.executable:
         json.dump({"error": {"code": "executable_missing", "message": "--executable required (or --wsl-probe)"}}, sys.stdout, indent=2)
         sys.stdout.write("\n")
@@ -505,6 +507,42 @@ def _cmd_runner_wsl_probe(args: argparse.Namespace, store: JobStore) -> int:
     )
     sys.stdout.write("\n")
     return 0 if outcome.status in {"dry_run", "succeeded"} else 1
+
+
+def _cmd_runner_wsl_grok_smoke(args: argparse.Namespace, store: JobStore) -> int:
+    """Plan-only: real Grok model call is gated off in this release."""
+    from .runner.plan import build_wsl_grok_smoke_plan, redact_argv_preview
+
+    try:
+        plan = build_wsl_grok_smoke_plan(
+            task_id=args.task_id, distro=args.wsl_distro or "", user=args.wsl_user or "",
+            grok_path=args.executable or "", cwd=args.cwd,
+            timeout_sec=min(float(args.timeout), 120.0),
+        )
+    except PlanError as exc:
+        json.dump({"error": {"code": exc.code, "message": exc.message}}, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    if args.execute:
+        json.dump({"error": {"code": "model_call_gated",
+                   "message": "real Grok execution not enabled in this release; needs explicit owner approval + separate build"}},
+                  sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 2
+    json.dump({
+        "dry_run": True, "task_id": plan.task_id,
+        "argv_preview": list(redact_argv_preview(plan.argv)),
+        "plan_backend": plan.backend, "execution_transport": plan.execution_transport,
+        "execution_kind": plan.execution_kind, "grok_executed": False,
+        "limits": {
+            "max_turns": 1, "max_turns_is_cost_cap": False, "cost_cap_flag": None,
+            "cost": "unknown_until_run; read json usage fields or `grok usage` afterwards",
+            "mcp_meta_tools": "not_removed_by_disallowed_tools",
+            "timeout": "kills host wsl.exe; guest cleanup not proven",
+        },
+    }, sys.stdout, indent=2)
+    sys.stdout.write("\n")
+    return 0
 
 
 # Indirection for tests (monkeypatch) - never starts a distro.
@@ -929,6 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--cwd", required=True)
     p_run.add_argument("--executable", default=None, help="Resolved grok or bridge-dummy path")
     p_run.add_argument("--wsl-probe", action="store_true", help="Fixed /usr/bin/printf inside a RUNNING distro via wsl.exe (transport proof, not Grok)")
+    p_run.add_argument("--wsl-grok-smoke", action="store_true", help="PLAN ONLY: fixed one-shot Grok smoke via wsl.exe (execution gated)")
     p_run.add_argument("--wsl-distro", default=None)
     p_run.add_argument("--wsl-user", default=None)
     p_run.add_argument("--owner", default="local-worker")
