@@ -20,9 +20,36 @@ INSTRUCTIONS = (
 )
 
 
+RESULT_TOOL = "bridge_job_result"
+
+
+def enabled_tool_names() -> tuple[str, ...]:
+    from .handlers import RESULTS_ENV, env_flag
+    return TOOL_NAMES + ((RESULT_TOOL,) if env_flag(RESULTS_ENV) else ())
+
+
 def register_bridge_tools(mcp: Any) -> None:
-    """Attach the allowlisted tools to a FastMCP instance."""
+    """Attach the allowlisted tools to a FastMCP instance.
+
+    The optional result-metadata tool is registered only if the operator set
+    GROK_BOT_BUILD_BRIDGE_MCP_RESULTS at startup; callers cannot toggle it.
+    """
     from . import handlers
+
+    if handlers.env_flag(handlers.RESULTS_ENV):
+        include_cost = handlers.env_flag(handlers.RESULTS_COST_ENV)
+
+        @mcp.tool(
+            name=RESULT_TOOL,
+            description=(
+                "Read-only validated result metadata for one job (parse status, stop reason, "
+                "turns, usage, cost status"
+                + (", exact reported cost" if include_cost else "")
+                + "). Never returns reply text, session id, prompt or paths."
+            ),
+        )
+        def bridge_job_result(task_id: str) -> dict[str, Any]:
+            return handlers.handle_job_result(task_id=task_id, include_cost=include_cost)
 
     @mcp.tool(
         name="bridge_runtime_info",

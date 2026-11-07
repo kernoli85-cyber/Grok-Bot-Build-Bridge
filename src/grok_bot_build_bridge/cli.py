@@ -250,41 +250,101 @@ def cmd_jobs_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+_ERROR_TEXT = {
+    "timeout_uncertain": "the run timed out; the process was killed on the host but cleanup inside WSL is not proven",
+    "success_exit_invalid_result": "the process exited 0 but its output was not a valid Grok JSON result",
+    "model_result_not_ok": "Grok returned a result that does not report a normal finish",
+    "smoke_text_mismatch": "the smoke reply was not exactly BRIDGE_OK",
+    "result_persist_failed": "the result could not be saved, so success is not claimed",
+    "lease_lost_during_run": "the worker lost its lease while running",
+}
+
+
+def _job_sentence(j: dict) -> str:
+    s = (f"Job {j['task_id']} is {j['status']} (attempt {j['attempt']} of {j['max_attempts']}, "
+         f"backend {j['backend']}).")
+    code = j.get("last_error_code")
+    if code:
+        s += f" Reason: {_ERROR_TEXT.get(code, code)}."
+    if j["status"] in {"needs_review", "failed"}:
+        s += " It will not be retried automatically."
+    return s
+
+
+def _result_sentence(r: dict | None) -> str:
+    if r is None:
+        return "No validated result summary is stored for this job."
+    if r["parse_status"] != "ok":
+        return f"The output could not be accepted as a Grok result ({r['parse_status']})."
+    parts = [f"Grok output parsed; stop reason {r['stop_reason'] or 'unknown'}"
+             f"{', marked as error' if r['is_error'] else ''}."]
+    if r["num_turns"] is not None:
+        parts.append(f"Turns used: {r['num_turns']}.")
+    if r["cost_status"] == "reported":
+        parts.append(f"Cost reported by Grok: US$ {r['total_cost_usd']}.")
+    else:
+        parts.append(f"Cost is unknown ({r['cost_status']}); absent cost is not zero.")
+    if r["expected_match"] is not None:
+        parts.append("The expected smoke text matched exactly." if r["expected_match"]
+                     else "The expected smoke text did not match.")
+    return " ".join(parts)
+
+
 def cmd_jobs_status(args: argparse.Namespace) -> int:
-    store = _store_from_args(args)
-    jobs = store.list_jobs()
-    show = bool(getattr(args, "show_result", False))
-    events = store.list_outbox()
-    json.dump(
-        {
-            "state_db": str(store.db_path),
-            "jobs": [
-                {
-                    "task_id": j.task_id,
-                    "correlation_id": j.correlation_id,
-                    "status": j.status.value,
-                    "attempt": j.attempt,
-                    "backend": j.backend,
-                    **({"result_summary": store.get_job_result(j.task_id)} if show else {}),
-                }
-                for j in jobs
-            ],
-            "outbox": [
-                {
-                    "event_id": e.event_id,
-                    "task_id": e.task_id,
-                    "event_type": e.event_type,
-                    "delivery": e.delivery.value,
-                    "attempt": e.attempt,
-                    "schema_version": e.schema_version,
-                }
-                for e in events
-            ],
-            "note": "Status metadata only; prompts/transcripts are not stored by default.",
-        },
-        sys.stdout,
-        indent=2,
-    )
+    """Strictly read-only (never creates or migrates the DB)."""
+    from .mcp_facade.scope import ScopeError, validate_task_id
+    from .state.readonly import ReadOnlyState, ReadOnlyStateError
+
+    def _err(code: str, msg: str, rc: int) -> int:
+        if args.format == "text":
+            sys.stdout.write(f"Error ({code}): {msg}\n")
+        else:
+            json.dump({"error": {"code": code, "message": msg}}, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        return rc
+
+    args.limit = max(1, min(int(args.limit), 500))
+    args.offset = max(0, int(args.offset))
+    tid = None
+    if args.task_id is not None:
+        try:
+            tid = validate_task_id(args.task_id)
+        except ScopeError as exc:
+            return _err(exc.code, exc.message, 2)
+    show = bool(args.show_result)
+    try:
+        with ReadOnlyState(args.state_db) as ro:
+            if tid is not None:
+                job = ro.get_job(tid)
+                if job is None:
+                    return _err("job_not_found", "no job with that task_id in this state DB", 3)
+                jobs, total = [job], 1
+                events = ro.outbox_for(tid, limit=args.limit)
+            else:
+                jobs = ro.list_jobs(limit=args.limit, offset=args.offset)
+                total = ro.count_jobs()
+                events = ro.outbox_for(None, limit=args.limit)
+            if show:
+                for j in jobs:
+                    j["result_summary"] = ro.get_result(j["task_id"])
+            mode = ro.info.access_mode if ro.info else None
+    except ReadOnlyStateError as exc:
+        return _err(exc.code, exc.message, 2)
+    if args.format == "text":
+        lines = [_job_sentence(j) + ((" " + _result_sentence(j.get("result_summary"))) if show else "")
+                 for j in jobs]
+        if tid is None:
+            lines.append(f"Showing {len(jobs)} of {total} jobs (offset {args.offset}).")
+        if not jobs:
+            lines.append("There are no jobs in this state DB.")
+        sys.stdout.write("\n".join(lines) + "\n")
+        return 0
+    json.dump({
+        "state_db": str(args.state_db), "read_only": True, "access_mode": mode,
+        "task_id_filter": tid, "total_jobs": total, "limit": args.limit,
+        "offset": 0 if tid else args.offset, "jobs": jobs, "outbox": events,
+        "note": "Status metadata only; prompts/transcripts are not stored by default.",
+    }, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 
@@ -659,6 +719,15 @@ def cmd_ask(args: argparse.Namespace) -> int:
         "not_isolated": "user ~/.grok config and native MCP servers may still load; trust state of the fresh cwd unknown",
         "approval": "--allow-model-call is a technical gate only; it does not replace the owner's explicit permission",
     }
+    if not args.execute and args.format == "text":
+        sys.stdout.write(
+            f"Dry run only: nothing was sent to Grok and nothing was written. "
+            f"The prompt has {info['prompt_bytes']} bytes and would run in a fresh /tmp/gbbb-ask-* "
+            f"directory inside WSL distro {plan.wsl_distro} as {plan.wsl_user}, with at most "
+            f"{plan.max_turns} turn(s) and a {plan.timeout_sec:g} s timeout. "
+            "A real call needs --execute --allow-model-call and the owner's permission. "
+            "While it runs, the prompt is visible in the process list.\n")
+        return 0
     if not args.execute:
         json.dump({"dry_run": True, "task_id": task_id, "grok_executed": False,
                    "state_written": False, "temp_dir_created": False,
@@ -710,8 +779,24 @@ def cmd_ask(args: argparse.Namespace) -> int:
         payload["answer"] = outcome.answer_text
         payload["answer_truncated"] = outcome.answer_truncated
         payload["answer_note"] = "transient display only; not stored in state/outbox/MCP"
-    json.dump(payload, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    if args.format == "text":
+        st = outcome.status
+        lines = [f"Job {task_id}: {st}."]
+        if outcome.error_code:
+            lines.append(f"Reason: {_ERROR_TEXT.get(outcome.error_code, outcome.error_code)}.")
+        lines.append(_result_sentence(outcome.result_summary))
+        if st != "succeeded":
+            lines.append("Nothing is retried automatically.")
+        if args.show_answer:
+            if outcome.answer_text is not None:
+                lines.append("Answer (not stored):")
+                lines.append(outcome.answer_text + (" [cut at display limit]" if outcome.answer_truncated else ""))
+            else:
+                lines.append("No answer can be shown for this run.")
+        sys.stdout.write("\n".join(lines) + "\n")
+    else:
+        json.dump(payload, sys.stdout, indent=2)
+        sys.stdout.write("\n")
     return 0 if outcome.status == "succeeded" else 1
 
 
@@ -1100,6 +1185,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("jobs-status", help="Inspect jobs/outbox in a state DB")
     p_status.add_argument("--state-db", required=True)
     p_status.add_argument("--show-result", action="store_true", help="Include allowlisted result summary (default hidden)")
+    p_status.add_argument("--task-id", default=None, help="Only this job (SQL-scoped)")
+    p_status.add_argument("--limit", type=int, default=50, help="Max jobs/events (1..500)")
+    p_status.add_argument("--offset", type=int, default=0)
+    p_status.add_argument("--format", choices=["json", "text"], default="json")
     p_status.set_defaults(func=cmd_jobs_status)
 
     p_tick = sub.add_parser(
@@ -1175,6 +1264,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ask.add_argument("--execute", action="store_true")
     p_ask.add_argument("--allow-model-call", action="store_true")
     p_ask.add_argument("--show-answer", action="store_true", help="Print bounded answer text (transient; not stored)")
+    p_ask.add_argument("--format", choices=["json", "text"], default="json")
     p_ask.set_defaults(func=cmd_ask)
 
     p_retry = sub.add_parser("jobs-retry", help="Explicit retry from failed/needs_review")

@@ -227,3 +227,57 @@ grok-bot-build-bridge ask --prompt "…" --wsl-distro Ubuntu --wsl-user <user> \
 2. `ask` progress/status UX: `jobs-status --task-id`, concise human output mode.
 3. Webhook result-free events via existing `--send` gate (dry-run first).
 4. With the owner's approval only: install 0.17.0 on host + one approved `ask` to confirm the real JSON shape.
+
+## v0.18.0 — read-only status, text output, opt-in MCP result metadata
+
+**Read-only state access** (`state/readonly.py`), used by `jobs-status` and all MCP status tools.
+Before 0.18.0 both opened the DB through `JobStore(...)`, whose constructor runs
+`CREATE TABLE IF NOT EXISTS`, so a "status" read could migrate (write to) the file. That is fixed.
+- A missing DB is reported (`state_db_absent`) and never created. Symlinks, non-SQLite files and
+  foreign or too-old schemas give clear error codes; errors never echo paths or raw SQLite text.
+- WAL tradeoff: if no `-wal` sidecar exists (the normal state after a clean shutdown), the DB is
+  opened `mode=ro&immutable=1`. No sidecars are created and no locks are taken, but a writer
+  starting at the same moment could give a stale read. If a `-wal` exists (a writer is active or
+  crashed), the DB is opened `mode=ro`: the main file is not written, but SQLite may update or
+  create the `-shm` index. Tests confirm that main-file hash, mtime and mode stay unchanged and
+  that no sidecars appear in the at-rest case.
+- Result rows are re-validated against the strict v1 schema on read; tampered rows are hidden.
+
+**`jobs-status`**: `--task-id` filters in SQL (an unknown id exits with 3; there is no fallback to
+all jobs). `--limit` defaults to 50 and is clamped to 1..500; `--offset` pages the list;
+`total_jobs` is reported. `--format text` prints plain sentences. JSON stays the default
+(existing keys are kept; `read_only`, `access_mode`, `total_jobs`, `task_id_filter`, `limit`
+and `offset` are new).
+
+**`ask --format text`**: plain sentences. A dry run says that nothing was sent or written and
+that the prompt will be visible in the process list. Errors are always printed as JSON.
+
+**MCP**
+- Status tools no longer return the state DB path, the job cwd or the lease owner.
+- The optional tool `bridge_job_result` is registered only when the operator sets
+  `GROK_BOT_BUILD_BRIDGE_MCP_RESULTS=1` before the server starts; callers cannot toggle it. When
+  it is off, the tool is not listed and calls to it are refused.
+- It returns metadata only: schema, parse status, model_ok, stop reason, is_error, turns, usage,
+  cost status and expected_match. It never returns the session id, reply text, hash or length,
+  the prompt, the cwd or paths.
+- The exact reported cost (a decimal string) is included only with
+  `GROK_BOT_BUILD_BRIDGE_MCP_RESULTS_COST=1`. An absent cost means unknown, not zero.
+- Covered over stdio and over authenticated streamable-HTTP (ASGI). Unauthenticated requests
+  get 401. No start, write or cancel tools exist.
+
+**Webhook/outbox:** unchanged and content-free (status, attempt, error_code). Nothing is sent
+live; result metadata is not added to events.
+
+### Product scope honesty
+The bridge today is a gated, text-only single-prompt runner (`ask`) plus a smoke test, status,
+and a read-only MCP facade. It is **not** a coding agent: all of Grok's file, shell and web tools
+are denied, and the working directory is an empty temp dir. Arbitrary coding on user repos is a
+separate, future, owner-approved design (needs a repo-scoped allowlist, a diff review step and
+write approvals). It is not implied by any current flag.
+
+### Next product gap
+The real Grok 1.0.70 JSON shape is still unverified. Everything above is tested with dummy
+producers only. The next useful step that needs the owner is: install 0.18.0 on the host and run
+one approved `ask --format text --show-answer`. Box-side next steps: a `doctor` command that
+checks host prerequisites read-only in one report, and a minimal repo-read-only `ask` design
+document (no code-writing).

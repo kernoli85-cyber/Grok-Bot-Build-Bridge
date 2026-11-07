@@ -11,7 +11,6 @@ from ..discovery import classify_discovery, nonroot_ready
 from ..models import DiscoveryReport
 from ..onboarding import onboarding_plan_to_dict, plan_onboarding, probe_pairing_metadata
 from ..resources import fixture_text
-from ..state.store import JobStore
 from .scope import (
     ScopeError,
     runtime_location,
@@ -70,13 +69,8 @@ def _err(code: str, message: str, **extra: Any) -> dict[str, Any]:
 def handle_runtime_info() -> dict[str, Any]:
     info = runtime_location()
     info["package_version"] = __version__
-    info["tools"] = [
-        "bridge_runtime_info",
-        "bridge_discover",
-        "bridge_onboard",
-        "bridge_status",
-        "bridge_job_status",
-    ]
+    from .tools import enabled_tool_names
+    info["tools"] = list(enabled_tool_names())
     info["not_exposed"] = [
         "shell",
         "write",
@@ -188,118 +182,116 @@ def handle_onboard(*, desired: str = "unset", mode: str = "fixture") -> dict[str
     return _ok(payload)
 
 
-def _open_existing_store() -> JobStore | dict[str, Any]:
-    """Open scoped DB if present. Does not create a missing database file."""
+RESULTS_ENV = "GROK_BOT_BUILD_BRIDGE_MCP_RESULTS"
+RESULTS_COST_ENV = "GROK_BOT_BUILD_BRIDGE_MCP_RESULTS_COST"
+_NOTE = ("Status metadata only; prompts, replies, session ids, cwd paths, credentials and "
+         "outbox payloads are not returned. Read-only: the DB is never created or migrated.")
+
+
+def env_flag(name: str) -> bool:
+    """Startup-only opt-in; strict values. Read once when the server is built."""
+    import os
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
+
+
+def _ro_open():
+    from ..state.readonly import ReadOnlyState, ReadOnlyStateError
     try:
         db = scoped_db_path()
     except ScopeError as exc:
         return _err(exc.code, exc.message)
-
-    if not db.is_file():
-        return _err(
-            "state_db_absent",
-            "scoped state.sqlite does not exist; MCP will not create it",
-            scoped_db=str(db),
-            runtime=runtime_location(),
-        )
-    # Existing file only — JobStore may ensure schema tables on open.
-    return JobStore(db)
+    ro = ReadOnlyState(db)
+    try:
+        ro.open()
+    except ReadOnlyStateError as exc:
+        return _err(exc.code, exc.message, runtime=runtime_location())
+    return ro
 
 
+def _guard(fn):
+    from ..state.readonly import ReadOnlyStateError
+
+    def wrapped(*a, **k):
+        try:
+            return fn(*a, **k)
+        except ReadOnlyStateError as exc:
+            return _err(exc.code, exc.message)
+    return wrapped
+
+
+@_guard
 def handle_status() -> dict[str, Any]:
-    store_or_err = _open_existing_store()
-    if isinstance(store_or_err, dict):
-        return store_or_err
-    store = store_or_err
-    jobs = store.list_jobs()
-    events = store.list_outbox()
-    return _ok(
-        {
-            "scoped_db": str(store.db_path),
-            "runtime": runtime_location(),
-            "jobs": [
-                {
-                    "task_id": j.task_id,
-                    "correlation_id": j.correlation_id,
-                    "status": j.status.value,
-                    "attempt": j.attempt,
-                    "backend": j.backend,
-                    "last_error_code": j.last_error_code,
-                }
-                for j in jobs
-            ],
-            "outbox": [
-                {
-                    "event_id": e.event_id,
-                    "task_id": e.task_id,
-                    "event_type": e.event_type,
-                    "delivery": e.delivery.value,
-                    "attempt": e.attempt,
-                    "schema_version": e.schema_version,
-                    # deliberately omit payload / last_error text (may hold operator content)
-                }
-                for e in events
-            ],
-            "note": (
-                "Status metadata only; prompts, transcripts, credentials, and outbox "
-                "payloads are not returned."
-            ),
-        }
-    )
+    ro = _ro_open()
+    if isinstance(ro, dict):
+        return ro
+    try:
+        jobs = ro.list_jobs()
+        total = ro.count_jobs()
+        events = ro.outbox_for(None)
+    finally:
+        ro.close()
+    return _ok({
+        "runtime": runtime_location(), "state_db_name": "state.sqlite",
+        "total_jobs": total, "jobs_shown": len(jobs),
+        "jobs": [{k: j[k] for k in ("task_id", "correlation_id", "status", "attempt",
+                                     "backend", "last_error_code")} for j in jobs],
+        "outbox": events, "note": _NOTE,
+    })
 
 
+@_guard
 def handle_job_status(*, task_id: str) -> dict[str, Any]:
     try:
         tid = validate_task_id(task_id)
     except ScopeError as exc:
         return _err(exc.code, exc.message)
-
-    store_or_err = _open_existing_store()
-    if isinstance(store_or_err, dict):
-        return store_or_err
-    store = store_or_err
-    job = store.get_job(tid)
+    ro = _ro_open()
+    if isinstance(ro, dict):
+        return ro
+    try:
+        job = ro.get_job(tid)
+        events = ro.outbox_for(tid) if job else []
+    finally:
+        ro.close()
     if job is None:
-        return _err(
-            "job_not_found",
-            f"no job with task_id={tid}",
-            scoped_db=str(store.db_path),
-            runtime=runtime_location(),
-        )
-    related = [
-        {
-            "event_id": e.event_id,
-            "event_type": e.event_type,
-            "delivery": e.delivery.value,
-            "attempt": e.attempt,
-            "schema_version": e.schema_version,
-        }
-        for e in store.list_outbox()
-        if e.task_id == tid
-    ]
-    return _ok(
-        {
-            "scoped_db": str(store.db_path),
-            "runtime": runtime_location(),
-            "job": {
-                "task_id": job.task_id,
-                "correlation_id": job.correlation_id,
-                "status": job.status.value,
-                "attempt": job.attempt,
-                "max_attempts": job.max_attempts,
-                "backend": job.backend,
-                "cwd": job.cwd,
-                "last_error_code": job.last_error_code,
-                "lease_owner": job.lease_owner,
-                # omit lease timing detail beyond presence
-            },
-            "outbox_for_task": related,
-            "note": (
-                "Status metadata only; prompts, transcripts, credentials, and outbox "
-                "payloads are not returned."
-            ),
-        }
-    )
+        return _err("job_not_found", "no job with that task_id", runtime=runtime_location())
+    return _ok({"runtime": runtime_location(), "job": job,
+                "outbox_for_task": [{k: e[k] for k in e if k != "task_id"} for e in events],
+                "note": _NOTE})
+
+
+_RESULT_KEYS = ("schema", "schema_variant", "parse_status", "model_ok", "stop_reason",
+                "is_error", "num_turns", "usage", "cost_status", "expected_match")
+
+
+@_guard
+def handle_job_result(*, task_id: str, include_cost: bool) -> dict[str, Any]:
+    """Immutable result metadata. Never session id, text, hash, length, prompt or paths.
+    include_cost is fixed at server startup, not by the caller."""
+    try:
+        tid = validate_task_id(task_id)
+    except ScopeError as exc:
+        return _err(exc.code, exc.message)
+    ro = _ro_open()
+    if isinstance(ro, dict):
+        return ro
+    try:
+        job = ro.get_job(tid)
+        r = ro.get_result(tid) if job else None
+    finally:
+        ro.close()
+    if job is None:
+        return _err("job_not_found", "no job with that task_id")
+    if r is None:
+        return _ok({"task_id": tid, "status": job["status"], "result_metadata": None,
+                    "note": "no validated result summary stored for this job"})
+    meta = {k: r[k] for k in _RESULT_KEYS}
+    if include_cost:
+        meta["total_cost_usd"] = r["total_cost_usd"]  # exact decimal string or null
+        meta["total_cost_usd_ticks"] = r["total_cost_usd_ticks"]
+    return _ok({"task_id": tid, "status": job["status"], "result_metadata": meta,
+                "cost_included": include_cost,
+                "note": "metadata only; absent cost means unknown, not zero"})
 
 
 def db_exists_without_create() -> bool:

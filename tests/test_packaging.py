@@ -249,6 +249,15 @@ def test_installed_wheel_e2e_dummy_grok_json_no_model_no_network(built_artifacts
     assert json.loads(r.stdout)["state_written"] is False and "SECRETP" not in r.stdout
     assert not ask_db.exists() and not xdg.exists()
 
+    # Read-only status from the installed wheel: SQL-scoped, text format, no creation.
+    r = cli("jobs-status", "--state-db", str(db), "--task-id", "ans1", "--show-result", "--format", "text")
+    assert r.returncode == 0 and "Job ans1 is succeeded" in r.stdout and "US$ 0.00012345" in r.stdout
+    assert "sess-ANS-1" not in r.stdout
+    r = cli("jobs-status", "--state-db", str(db), "--task-id", "ghost")
+    assert r.returncode == 3
+    ghost_db = tmp_path / "ghost" / "s.db"
+    assert cli("jobs-status", "--state-db", str(ghost_db)).returncode == 2 and not ghost_db.parent.exists()
+
     r = cli("outbox-pump", "--state-db", str(db))  # dry-run default; no --send
     assert r.returncode == 0, r.stdout + r.stderr
     assert "0d3f-AB_9" not in r.stdout and "BRIDGE_OK" not in r.stdout
